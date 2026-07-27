@@ -781,11 +781,16 @@ module_ssh_port() {
 
     # Перезапуск
     if confirm "Перезапустить SSHD сейчас? (текущая сессия использует порт ${current_port} - НЕ прервётся)" "y"; then
-        dry_run_or_exec "Смена SSH порта" \
-            "SSHD будет перезапущен" \
-            "systemctl restart sshd"
-        success "SSHD перезапущен на порту ${new_port}."
-        warn "Подключиться через: ssh -p ${new_port} user@$(hostname -I 2>/dev/null | awk '{print $1}')"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            show_ascii_dryrun "Смена SSH порта" "SSHD будет перезапущен" "systemctl restart ssh || systemctl restart sshd"
+        else
+            if systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null; then
+                success "SSHD перезапущен на порту ${new_port}."
+                warn "Подключиться через: ssh -p ${new_port} user@$(hostname -I 2>/dev/null | awk '{print $1}')"
+            else
+                warn "Не удалось перезапустить SSHD. Перезапустите вручную: systemctl restart ssh"
+            fi
+        fi
     fi
 
     save_state "new_ssh_port" "$new_port"
@@ -988,10 +993,15 @@ module_ssh_keys() {
     fi
 
     if confirm "Перезапустить SSHD для применения изменений?" "y"; then
-        dry_run_or_exec "SSH-ключи" \
-            "SSHD будет перезапущен" \
-            "systemctl restart sshd"
-        success "SSHD перезапущен."
+        if [[ "$DRY_RUN" == "true" ]]; then
+            show_ascii_dryrun "SSH-ключи" "SSHD будет перезапущен" "systemctl restart ssh || systemctl restart sshd"
+        else
+            if systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null; then
+                success "SSHD перезапущен."
+            else
+                warn "Не удалось перезапустить SSHD. Перезапустите вручную: systemctl restart ssh"
+            fi
+        fi
     fi
 
     save_state "ssh_keys_configured" "yes"
