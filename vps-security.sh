@@ -10,7 +10,7 @@ set -euo pipefail
 # --------------------------------------
 # Константы
 # --------------------------------------
-readonly VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.0.0"
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_URL="https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh"
 readonly ORIGINAL_SSH_PORT=22
@@ -38,7 +38,7 @@ init_paths() {
     BACKUP_DIR="/root/vps-security-backups/$(date +%Y%m%d_%H%M%S)"
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
     mkdir -p "$BACKUP_DIR"
-    log "INFO" "Скрипт запущен. PID=$$ Пользователь=root Версия=${VERSION}"
+    log "INFO" "Скрипт запущен. PID=$$ Пользователь=root Версия=${SCRIPT_VERSION}"
 }
 
 # --------------------------------------
@@ -1747,7 +1747,7 @@ run_tests() {
 # ГЛАВНОЕ МЕНЮ
 # ======================================================================
 show_menu() {
-    header "Скрипт настройки безопасности VPS v${VERSION}"
+    header "Скрипт настройки безопасности VPS v${SCRIPT_VERSION}"
     echo -e "${BOLD}Debian Linux | Интерактивная настройка${NC}"
     echo ""
     echo -e "  ${CYAN}[1]${NC}   Создание пользователя"
