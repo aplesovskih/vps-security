@@ -5,23 +5,23 @@
 ## Быстрая установка
 
 ```bash
-sudo bash <(curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh)
+curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh | sudo bash
 ```
 
 ## Демо-режим (ничего не меняет)
 
 ```bash
-sudo bash <(curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh) --dry-run
+curl -sO https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh && sudo bash vps-security.sh --dry-run
 ```
 
 ## Тесты
 
 ```bash
 # Тесты обработки ошибок
-sudo bash <(curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-error-handling.sh)
+curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-error-handling.sh | sudo bash
 
 # Интеграционные тесты
-sudo bash <(curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-integration.sh)
+curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-integration.sh | sudo bash
 ```
 
 ## Модули

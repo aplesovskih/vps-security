@@ -1805,7 +1805,7 @@ main() {
             echo "  --help       Показать справку"
             echo ""
             echo "Быстрый запуск:"
-            echo "  sudo bash <(curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh)"
+            echo "  curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh | sudo bash"
             echo ""
             exit 0
             ;;
