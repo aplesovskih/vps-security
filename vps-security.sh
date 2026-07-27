@@ -781,14 +781,23 @@ module_ssh_port() {
     fi
 
     # Перезапуск
+    echo ""
+    warn "После перезапуска SSHD:"
+    echo "  1. Откройте НОВЫЙ терминал"
+    echo "  2. Подключитесь: ssh -p ${new_port} user@$(hostname -I 2>/dev/null | awk '{print $1}')"
+    echo "  3. Если не получится — старый порт ${current_port} ещё работает"
+    echo ""
     show_ascii_warning "При перезапуске SSHD текущий SSH-сеанс будет разорван и связь с сервером потеряется!"
     if confirm "Перезапустить SSHD сейчас? (текущая сессия использует порт ${current_port} - НЕ прервётся)" "y"; then
         if [[ "$DRY_RUN" == "true" ]]; then
             show_ascii_dryrun "Смена SSH порта" "SSHD будет перезапущен" "systemctl restart ssh || systemctl restart sshd"
         else
-            if systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null; then
+            if systemctl restart ssh || systemctl restart sshd; then
+                sleep 2
                 success "SSHD перезапущен на порту ${new_port}."
+                echo ""
                 warn "Подключиться через: ssh -p ${new_port} user@$(hostname -I 2>/dev/null | awk '{print $1}')"
+                warn "Если не получится — попробуйте порт ${current_port}"
             else
                 warn "Не удалось перезапустить SSHD. Перезапустите вручную: systemctl restart ssh"
             fi
