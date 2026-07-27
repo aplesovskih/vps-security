@@ -720,7 +720,8 @@ module_ssh_port() {
     header "МОДУЛЬ 4: Смена SSH порта"
 
     local current_port
-    current_port=$(grep -E "^Port\s" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "22")
+    current_port=$(grep -E "^[# ]*Port\s" /etc/ssh/sshd_config 2>/dev/null | grep -v "^[[:space:]]*#" | head -1 | awk '{print $2}')
+    current_port="${current_port:-22}"
     info "Текущий порт SSH: ${current_port}"
 
     if ! confirm "Изменить порт SSH?"; then
@@ -750,7 +751,7 @@ module_ssh_port() {
     # Изменение
     if ! dry_run_or_exec "Смена SSH порта" \
         "Порт SSH изменён с ${current_port} на ${new_port}" \
-        "sed -i 's/^Port\s.*/# Port ${current_port}\nPort ${new_port}/' /etc/ssh/sshd_config"; then
+        "sed -i '/^\s*Port\s/ s/^/#/' /etc/ssh/sshd_config && echo 'Port ${new_port}' >> /etc/ssh/sshd_config"; then
         error_handler "Модуль 4" "Не удалось изменить sshd_config" "yes" "yes"
         case $? in 2) module_ssh_port; return ;; 1) save_state "new_ssh_port" "$current_port"; return ;; 0) return ;; esac
     fi
