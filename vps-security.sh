@@ -400,10 +400,19 @@ module_create_user() {
 
     # Пароль
     if confirm "Установить пароль для '${username}'?" "y"; then
-        if [[ "$DRY_RUN" == "true" ]]; then
-            show_ascii_dryrun "Создание пользователя" "Будет установлен пароль для '${username}'" "passwd $username"
+        local password
+        echo -e "${YELLOW}Введите пароль для '${username}':${NC}"
+        read -rs password || true
+        echo ""
+        if [[ -n "$password" ]]; then
+            if [[ "$DRY_RUN" == "true" ]]; then
+                show_ascii_dryrun "Создание пользователя" "Будет установлен пароль для '${username}'" "echo '${username}:***' | chpasswd"
+            else
+                echo "${username}:${password}" | chpasswd
+                success "Пароль установлен."
+            fi
         else
-            passwd "$username"
+            warn "Пароль пустой. Пропуск."
         fi
     fi
 
@@ -448,7 +457,10 @@ module_create_user() {
             "sudo -u $username ssh-keygen -t $key_type -f /home/$username/.ssh/id_${key_type} -N '' -C '${username}@$(hostname)'"; then
             warn "Не удалось сгенерировать ключ. Продолжаем."
         else
-            if [[ "$DRY_RUN" != "true" ]]; then
+            if [[ "$DRY_RUN" == "true" ]]; then
+                success "SSH-ключ (${key_type}) будет сгенерирован для '${username}'."
+                info "Публичный ключ будет доступен в: /home/${username}/.ssh/id_${key_type}.pub"
+            else
                 local key_path="/home/${username}/.ssh/id_${key_type}"
                 chmod 700 "/home/${username}/.ssh"
                 chmod 600 "${key_path}"
@@ -1752,6 +1764,11 @@ run_tests() {
 # ======================================================================
 show_menu() {
     header "Скрипт настройки безопасности VPS v${SCRIPT_VERSION}"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${BOLD}${CYAN}  ◎  РЕЖИМ: ДЕМОНСТРАЦИИ (dry-run) — ничего не будет изменено${NC}"
+    else
+        echo -e "${BOLD}${YELLOW}  ⚠  РЕЖИМ: РЕАЛЬНЫЙ — все изменения будут применены${NC}"
+    fi
     echo -e "${BOLD}Debian Linux | Интерактивная настройка${NC}"
     echo ""
     echo -e "  ${CYAN}[1]${NC}   Создание пользователя"
