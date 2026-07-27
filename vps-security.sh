@@ -193,7 +193,7 @@ error_handler() {
 
     local choice
     while true; do
-        read -rp "$(echo -e "${BOLD}Ваш выбор: ${NC}")" choice
+        read -rp "$(echo -e "${BOLD}Ваш выбор: ${NC}")" choice || return 0
         case "${choice,,}" in
             r) return 2 ;;
             s) return 1 ;;
@@ -303,7 +303,9 @@ save_state() {
 load_state() {
     local key="$1" default="${2:-}"
     if [[ -f "${BACKUP_DIR}/state.txt" ]]; then
-        grep "^${key}=" "${BACKUP_DIR}/state.txt" 2>/dev/null | tail -1 | cut -d'=' -f2-
+        local result
+        result=$(grep "^${key}=" "${BACKUP_DIR}/state.txt" 2>/dev/null | tail -1 | cut -d'=' -f2-) || true
+        echo "${result:-$default}"
     else
         echo "$default"
     fi
@@ -322,7 +324,9 @@ confirm() {
         prompt="${prompt} [д/Н]: "
     fi
     while true; do
-        read -rp "$(echo -e "${YELLOW}${prompt}${NC}")" yn
+        read -rp "$(echo -e "${YELLOW}${prompt}${NC}")" yn || {
+            [[ "$default" == "y" ]] && return 0 || return 1
+        }
         case "${yn:-$default}" in
             [ДдYy]*) return 0 ;;
             [НнNn]*) return 1 ;;
@@ -335,7 +339,7 @@ ask_port() {
     local prompt="$1"
     local port
     while true; do
-        read -rp "$(echo -e "${YELLOW}${prompt}${NC}")" port
+        read -rp "$(echo -e "${YELLOW}${prompt}${NC}")" port || return 1
         if validate_port "$port"; then
             echo "$port"
             return 0
@@ -379,7 +383,7 @@ module_create_user() {
 
     local username
     while true; do
-        read -rp "$(echo -e "${YELLOW}Введите имя нового пользователя: ${NC}")" username
+        read -rp "$(echo -e "${YELLOW}Введите имя нового пользователя: ${NC}")" username || return 0
         if validate_username "$username"; then
             break
         fi
@@ -431,7 +435,7 @@ module_create_user() {
     if confirm "Сгенерировать SSH-ключ для '${username}'?" "y"; then
         local key_type
         while true; do
-            read -rp "$(echo -e "${YELLOW}Тип ключа [ed25519/rsa]: ${NC}")" key_type
+            read -rp "$(echo -e "${YELLOW}Тип ключа [ed25519/rsa]: ${NC}")" key_type || { key_type="ed25519"; break; }
             key_type="${key_type:-ed25519}"
             case "$key_type" in
                 ed25519|rsa) break ;;
@@ -544,9 +548,9 @@ module_firewall() {
     # Кастомные порты
     while confirm "Добавить правило для кастомного порта?"; do
         local port proto
-        port=$(ask_port "Введите номер порта: ")
+        port=$(ask_port "Введите номер порта: ") || continue
         while true; do
-            read -rp "$(echo -e "${YELLOW}Протокол [tcp/udp/оба]: ${NC}")" proto
+            read -rp "$(echo -e "${YELLOW}Протокол [tcp/udp/оба]: ${NC}")" proto || { proto="tcp"; break; }
             case "$proto" in
                 tcp|udp|оба|both) break ;;
                 *) error "Введите tcp, udp или оба" ;;
@@ -619,16 +623,16 @@ module_fail2ban() {
     ssh_port=$(load_state "new_ssh_port" "$ORIGINAL_SSH_PORT")
 
     local max_retry bantime findtime ignore_ip
-    read -rp "$(echo -e "${YELLOW}Макс. неудачных попыток перед баном [3]: ${NC}")" max_retry
+    read -rp "$(echo -e "${YELLOW}Макс. неудачных попыток перед баном [3]: ${NC}")" max_retry || true
     max_retry="${max_retry:-3}"
 
-    read -rp "$(echo -e "${YELLOW}Длительность блокировки в секундах [3600]: ${NC}")" bantime
+    read -rp "$(echo -e "${YELLOW}Длительность блокировки в секундах [3600]: ${NC}")" bantime || true
     bantime="${bantime:-3600}"
 
-    read -rp "$(echo -e "${YELLOW}Окно подсчёта попыток в секундах [600]: ${NC}")" findtime
+    read -rp "$(echo -e "${YELLOW}Окно подсчёта попыток в секундах [600]: ${NC}")" findtime || true
     findtime="${findtime:-600}"
 
-    read -rp "$(echo -e "${YELLOW}Игнорировать IP (например 127.0.0.1 или пусто): ${NC}")" ignore_ip
+    read -rp "$(echo -e "${YELLOW}Игнорировать IP (например 127.0.0.1 или пусто): ${NC}")" ignore_ip || true
 
     if [[ "$DRY_RUN" == "true" ]]; then
         show_ascii_dryrun "Настройка Fail2ban" \
@@ -794,7 +798,7 @@ module_ssh_keys() {
     if confirm "Сгенерировать новую SSH-ключевую пару на сервере?"; then
         local key_type
         while true; do
-            read -rp "$(echo -e "${YELLOW}Тип ключа [ed25519/rsa]: ${NC}")" key_type
+            read -rp "$(echo -e "${YELLOW}Тип ключа [ed25519/rsa]: ${NC}")" key_type || { key_type="ed25519"; break; }
             key_type="${key_type:-ed25519}"
             case "$key_type" in
                 ed25519|rsa) break ;;
@@ -826,7 +830,7 @@ module_ssh_keys() {
         local pubkey
         echo ""
         info "Вставьте ваш ПУБЛИЧНЫЙ КЛЮЧ (полная строка, начинается с ssh-ed25519 или ssh-rsa):"
-        read -rp "$(echo -e "${YELLOW}> ${NC}")" pubkey
+        read -rp "$(echo -e "${YELLOW}> ${NC}")" pubkey || true
 
         if [[ -n "$pubkey" ]]; then
             if [[ "$DRY_RUN" == "true" ]]; then
@@ -849,14 +853,14 @@ module_ssh_keys() {
     # Ключ для другого пользователя
     if confirm "Добавить публичный ключ другому пользователю?" "n"; then
         local target_user
-        read -rp "$(echo -e "${YELLOW}Имя пользователя: ${NC}")" target_user
+        read -rp "$(echo -e "${YELLOW}Имя пользователя: ${NC}")" target_user || true
 
-        if ! id "$target_user" &>/dev/null; then
+        if [[ -n "$target_user" ]] && ! id "$target_user" &>/dev/null; then
             error "Пользователь '${target_user}' не существует."
-        else
+        elif [[ -n "$target_user" ]]; then
             echo -e "${YELLOW}Вставьте публичный ключ:${NC}"
             local pubkey2
-            read -rp "> " pubkey2
+            read -rp "> " pubkey2 || true
 
             if [[ -n "$pubkey2" ]]; then
                 if [[ "$DRY_RUN" == "true" ]]; then
@@ -920,7 +924,7 @@ module_ssh_keys() {
     fi
 
     local max_tries
-    read -rp "$(echo -e "${YELLOW}Макс. попыток аутентификации [3]: ${NC}")" max_tries
+    read -rp "$(echo -e "${YELLOW}Макс. попыток аутентификации [3]: ${NC}")" max_tries || true
     max_tries="${max_tries:-3}"
     if [[ "$DRY_RUN" == "true" ]]; then
         show_ascii_dryrun "SSH-ключи" "MaxAuthTries будет установлен в ${max_tries}" "sed -i 's/^MaxAuthTries.*/MaxAuthTries ${max_tries}/' /etc/ssh/sshd_config"
@@ -1296,7 +1300,7 @@ module_aide() {
     local aide_email=""
     if confirm "Настроить email-уведомления для AIDE?" "y"; then
         while true; do
-            read -rp "$(echo -e "${YELLOW}Введите email для уведомлений: ${NC}")" aide_email
+            read -rp "$(echo -e "${YELLOW}Введите email для уведомлений: ${NC}")" aide_email || break
             if validate_email "$aide_email"; then
                 break
             fi
@@ -1404,7 +1408,7 @@ module_rkhunter() {
     local rkhunter_email=""
     if confirm "Настроить email-уведомления для rkhunter?" "y"; then
         while true; do
-            read -rp "$(echo -e "${YELLOW}Введите email для уведомлений: ${NC}")" rkhunter_email
+            read -rp "$(echo -e "${YELLOW}Введите email для уведомлений: ${NC}")" rkhunter_email || break
             if validate_email "$rkhunter_email"; then
                 break
             fi
@@ -1718,7 +1722,7 @@ run_tests() {
     echo ""
 
     local choice
-    read -rp "$(echo -e "${BOLD}Ваш выбор: ${NC}")" choice
+    read -rp "$(echo -e "${BOLD}Ваш выбор: ${NC}")" choice || return 0
 
     case "$choice" in
         1)
@@ -1815,7 +1819,7 @@ main() {
 
     while true; do
         show_menu
-        read -rp "$(echo -e "${BOLD}Ваш выбор: ${NC}")" choice
+        read -rp "$(echo -e "${BOLD}Ваш выбор: ${NC}")" choice || exit 0
 
         case "${choice,,}" in
             1)  module_create_user ;;
