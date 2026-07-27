@@ -1142,7 +1142,7 @@ module_ssh_audit() {
         local grace_time
         grace_time=$(grep -E "^LoginGraceTime" "$sshd_conf" 2>/dev/null | awk '{print $2}' || echo "120")
         if [[ "$grace_time" -gt 60 ]] 2>/dev/null; then
-            warn "  [!] LoginGraceTime = ${grace}с (рекомендуется: 30с или менее)"
+            warn "  [!] LoginGraceTime = ${grace_time}с (рекомендуется: 30с или менее)"
             ((issues++)) || true
         else
             success "  LoginGraceTime: ${grace_time}с"
