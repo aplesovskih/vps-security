@@ -720,7 +720,7 @@ module_ssh_port() {
     header "МОДУЛЬ 4: Смена SSH порта"
 
     local current_port
-    current_port=$(grep -E "^[# ]*Port\s" /etc/ssh/sshd_config 2>/dev/null | grep -v "^[[:space:]]*#" | head -1 | awk '{print $2}')
+    current_port=$(grep -E "^[# ]*Port\s" /etc/ssh/sshd_config 2>/dev/null | grep -v "^[[:space:]]*#" | head -1 | awk '{print $2}') || true
     current_port="${current_port:-22}"
     info "Текущий порт SSH: ${current_port}"
 
