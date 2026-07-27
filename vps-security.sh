@@ -780,6 +780,7 @@ module_ssh_port() {
     fi
 
     # Перезапуск
+    show_ascii_warning "При перезапуске SSHD текущий SSH-сеанс будет разорван и связь с сервером потеряется!"
     if confirm "Перезапустить SSHD сейчас? (текущая сессия использует порт ${current_port} - НЕ прервётся)" "y"; then
         if [[ "$DRY_RUN" == "true" ]]; then
             show_ascii_dryrun "Смена SSH порта" "SSHD будет перезапущен" "systemctl restart ssh || systemctl restart sshd"
@@ -992,6 +993,7 @@ module_ssh_keys() {
         fi
     fi
 
+    show_ascii_warning "При перезапуске SSHD текущий SSH-сеанс будет разорван и связь с сервером потеряется!"
     if confirm "Перезапустить SSHD для применения изменений?" "y"; then
         if [[ "$DRY_RUN" == "true" ]]; then
             show_ascii_dryrun "SSH-ключи" "SSHD будет перезапущен" "systemctl restart ssh || systemctl restart sshd"
