@@ -1795,6 +1795,11 @@ show_menu() {
 # ТОЧКА ВХОДА
 # ======================================================================
 main() {
+    # Если stdin — pipe (curl | bash), переключить на терминал
+    if [[ ! -t 0 ]]; then
+        exec </dev/tty
+    fi
+
     check_root
     init_paths
 
@@ -1836,7 +1841,11 @@ main() {
 
     while true; do
         show_menu
-        read -rp "$(echo -e "${BOLD}Ваш выбор: ${NC}")" choice || exit 0
+        read -rp "$(echo -e "${BOLD}Ваш выбор: ${NC}")" choice || {
+            echo ""
+            error "Нет доступного ввода. Используйте: sudo bash $SCRIPT_NAME"
+            exit 1
+        }
 
         case "${choice,,}" in
             1)  module_create_user ;;
