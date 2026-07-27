@@ -1782,7 +1782,7 @@ show_menu() {
     echo -e "  ${CYAN}[9]${NC}   rkhunter — обнаружение руткитов"
     echo -e "  ${CYAN}[10]${NC}  Блокировка пароля root"
     echo ""
-    echo -e "  ${CYAN}[D]${NC}   Демо-режим (dry-run) — показать что будет сделано"
+    echo -e "  ${CYAN}[D]${NC}   Переключить режим (демо/реальный)"
     echo -e "  ${CYAN}[R]${NC}   Откат изменений"
     echo -e "  ${CYAN}[T]${NC}   Запустить тесты"
     echo -e "  ${CYAN}[A]${NC}   Запустить ВСЕ модули (интерактивно)"
@@ -1859,11 +1859,19 @@ main() {
             9)  module_rkhunter ;;
             10) module_lock_root ;;
             d|D)
-                DRY_RUN=true
-                echo ""
-                echo -e "${BOLD}${CYAN}  ◎  ДЕМО-РЕЖИМ ВКЛЮЧЁН${NC}"
-                echo -e "  Скрипт покажет что будет сделано, но ничего не изменит."
-                echo ""
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    DRY_RUN=false
+                    echo ""
+                    echo -e "${BOLD}${YELLOW}  ⚠  РЕАЛЬНЫЙ РЕЖИМ ВКЛЮЧЁН${NC}"
+                    echo -e "  Все изменения будут применены к системе."
+                    echo ""
+                else
+                    DRY_RUN=true
+                    echo ""
+                    echo -e "${BOLD}${CYAN}  ◎  ДЕМО-РЕЖИМ ВКЛЮЧЁН${NC}"
+                    echo -e "  Скрипт покажет что будет сделано, но ничего не изменит."
+                    echo ""
+                fi
                 ;;
             r|R)
                 do_rollback ""
@@ -1897,6 +1905,7 @@ main() {
     done
 
     log "INFO" "Скрипт завершён."
+    exit 0
 }
 
 main "$@"
