@@ -16,7 +16,6 @@ fi
 # --------------------------------------
 readonly SCRIPT_VERSION="2.0.0"
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly SCRIPT_URL="https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh"
 readonly ORIGINAL_SSH_PORT=22
 
 # Цвета
@@ -251,15 +250,6 @@ validate_port() {
     return 0
 }
 
-validate_email() {
-    local email="$1"
-    if ! [[ "$email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-        error "Неверный формат email."
-        return 1
-    fi
-    return 0
-}
-
 check_package() {
     local pkg="$1"
     dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"
@@ -305,15 +295,21 @@ load_state() {
 # --------------------------------------
 set_sshd_option() {
     local key="$1" value="$2"
+    local config="/etc/ssh/sshd_config"
     if [[ "$DRY_RUN" == "true" ]]; then
         show_ascii_dryrun "SSH" "${key} будет установлен в '${value}'" \
-            "sed -i 's/^${key}.*/${key} ${value}/' /etc/ssh/sshd_config"
+            "sed -i '/^#\\?${key}\\b/d; /^Include /!b; i\\${key} ${value}\\n' ${config}"
         return 0
     fi
-    if grep -q "^${key}" /etc/ssh/sshd_config; then
-        sed -i "s/^${key}.*/${key} ${value}/" /etc/ssh/sshd_config
+    # ponytail: sshd uses first-match-wins — удалить все существующие строки (включая закомментированные)
+    # и вставить ДО первого Include, чтобы значение не перезаписывалось файлами из sshd_config.d/
+    sed -i "/^[# ]*${key}\\b/d" "$config"
+    local include_line
+    include_line=$(grep -n "^Include" "$config" 2>/dev/null | head -1 | cut -d: -f1)
+    if [[ -n "$include_line" ]]; then
+        sed -i "${include_line}i\\${key} ${value}" "$config"
     else
-        echo "${key} ${value}" >> /etc/ssh/sshd_config
+        echo "${key} ${value}" >> "$config"
     fi
 }
 
@@ -1245,245 +1241,6 @@ LoginGraceTime 30
 }
 
 # ======================================================================
-# МОДУЛЬ 8: AIDE
-# ======================================================================
-module_aide() {
-    header "МОДУЛЬ 8: AIDE — мониторинг целостности файлов (IDS)"
-
-    if ! confirm "Установить и настроить AIDE (система обнаружения вторжений)?"; then
-        info "Пропуск AIDE."
-        save_state "aide_configured" "no"
-        return 0
-    fi
-
-    # Установка
-    info "Установка AIDE..."
-    if ! dry_run_or_exec "AIDE" \
-        "AIDE будет установлен" \
-        "apt-get update -qq && apt-get install -y -qq aide"; then
-        handle_error "Модуль 8" "Не удалось установить AIDE" module_aide "aide_configured" || true
-        return
-    fi
-    success "AIDE установлен."
-
-    backup_file "/etc/aide/aide.conf"
-
-    # Проверка места на диске
-    local avail_kb
-    avail_kb=$(df / --output=avail 2>/dev/null | tail -1 | tr -d ' ' || echo "0")
-    if [[ "$avail_kb" -lt 1048576 ]] 2>/dev/null; then
-        show_ascii_warning "Мало места на диске! Доступно: $(( avail_kb / 1024 ))MB. Рекомендуется минимум 1GB."
-        if ! confirm "Продолжить несмотря на мало места?"; then
-            save_state "aide_configured" "no"
-            return 0
-        fi
-    fi
-
-    info "Проверка AIDE..."
-    if [[ "$DRY_RUN" == "true" ]]; then
-        show_ascii_dryrun "AIDE" \
-            "Будет создана база AIDE (может занять несколько минут)" \
-            "aideinit || aide --init"
-    else
-        warn "Создание базы AIDE... Это может занять несколько минут."
-        echo ""
-        if aideinit 2>/dev/null || aide --init 2>/dev/null; then
-            success "База AIDE инициализирована."
-            local aide_db_dir
-            aide_db_dir=$(grep "^DBDIR" /etc/aide/aide.conf 2>/dev/null | awk '{print $3}' || echo "/var/lib/aide")
-            aide_db_dir="${aide_db_dir:-/var/lib/aide}"
-
-            if [[ -f "${aide_db_dir}/aide.db.new" ]]; then
-                mv "${aide_db_dir}/aide.db.new" "${aide_db_dir}/aide.db"
-                success "База AIDE активирована."
-            elif [[ -f "${aide_db_dir}/aide.db.new.gz" ]]; then
-                mv "${aide_db_dir}/aide.db.new.gz" "${aide_db_dir}/aide.db.gz"
-                success "База AIDE активирована."
-            fi
-        else
-            handle_error "Модуль 8" "Не удалось инициализировать AIDE" module_aide "aide_configured" "error" || true
-            return
-        fi
-    fi
-
-    # Email
-    local aide_email=""
-    if confirm "Настроить email-уведомления для AIDE?" "y"; then
-        while true; do
-            read -rp "$(echo -e "${YELLOW}Введите email для уведомлений: ${NC}")" aide_email || break
-            if validate_email "$aide_email"; then
-                break
-            fi
-        done
-
-        # Установка mailutils
-        if ! command -v mail &>/dev/null; then
-            dry_run_or_exec "AIDE" \
-                "mailutils будет установлен для отправки уведомлений" \
-                "apt-get install -y -qq mailutils"
-        fi
-    fi
-
-    # Cron
-    if confirm "Настроить ежедневную проверку AIDE через cron?" "y"; then
-        if [[ "$DRY_RUN" == "true" ]]; then
-            show_ascii_dryrun "AIDE" \
-                "Будет создана cron-задача для ежедневной проверки" \
-                "cat > /etc/cron.daily/aide-check"
-        else
-            mkdir -p /var/log/aide
-            cat > /etc/cron.daily/aide-check <<CRON
-#!/bin/bash
-LOG="/var/log/aide/aide-check-\$(date +%Y%m%d).log"
-REPORT="/var/log/aide/aide-report-\$(date +%Y%m%d).txt"
-echo "=== Проверка AIDE: \$(date) ===" > "\$LOG"
-aide --check >> "\$LOG" 2>&1
-CRON
-            if [[ -n "$aide_email" ]]; then
-                cat >> /etc/cron.daily/aide-check <<CRON
-if grep -q "changed\|Added\|Removed" "\$LOG"; then
-    echo "ALERT: AIDE обнаружил изменения на \$(hostname)!" > "\$REPORT"
-    echo "Дата: \$(date)" >> "\$REPORT"
-    echo "Сервер: \$(hostname) (\$(hostname -I | awk '{print \$1}'))" >> "\$REPORT"
-    echo "" >> "\$REPORT"
-    grep -E "^(Changed|Added|Removed|File)" "\$LOG" >> "\$REPORT" 2>/dev/null || true
-    mail -s "[BEZOPASnost] AIDE Alert: \$(hostname) - обнаружены изменения" "${aide_email}" < "\$REPORT"
-fi
-CRON
-            fi
-            cat >> /etc/cron.daily/aide-check <<'CRON'
-find /var/log/aide -name "aide-*" -mtime +30 -delete 2>/dev/null
-CRON
-            chmod +x /etc/cron.daily/aide-check
-            success "Cron-задача AIDE создана."
-            [[ -n "$aide_email" ]] && success "Уведомления будут отправляться на: ${aide_email}"
-        fi
-    fi
-
-    # Первый запуск
-    if [[ "$DRY_RUN" != "true" ]] && confirm "Запустить первую проверку AIDE сейчас? (занимает время)" "n"; then
-        warn "Запуск проверки AIDE..."
-        aide --check 2>&1 | tail -20
-        success "Проверка AIDE завершена."
-    fi
-
-    info "Полезные команды:"
-    echo -e "  ${CYAN}aide --check${NC}        - проверить изменения"
-    echo -e "  ${CYAN}aide --update${NC}       - обновить базу после просмотра изменений"
-    echo -e "  ${CYAN}aide --compare${NC}      - сравнить текущее состояние"
-
-    save_state "aide_configured" "yes"
-    success "Модуль 8 завершён."
-}
-
-# ======================================================================
-# МОДУЛЬ 9: rkhunter
-# ======================================================================
-module_rkhunter() {
-    header "МОДУЛЬ 9: rkhunter — обнаружение руткитов"
-
-    if ! confirm "Установить и настроить rkhunter (сканер руткитов)?"; then
-        info "Пропуск rkhunter."
-        save_state "rkhunter_configured" "no"
-        return 0
-    fi
-
-    # Установка
-    info "Установка rkhunter..."
-    if ! dry_run_or_exec "rkhunter" \
-        "rkhunter будет установлен" \
-        "apt-get update -qq && apt-get install -y -qq rkhunter"; then
-        handle_error "Модуль 9" "Не удалось установить rkhunter" module_rkhunter "rkhunter_configured" || true
-        return
-    fi
-    success "rkhunter установлен."
-
-    backup_file "/etc/rkhunter.conf"
-
-    # Обновление баз
-    if [[ "$DRY_RUN" == "true" ]]; then
-        show_ascii_dryrun "rkhunter" \
-            "Базы rkhunter будут обновлены" \
-            "rkhunter --update --quiet"
-    else
-        info "Обновление баз rkhunter..."
-        if ! rkhunter --update --quiet 2>/dev/null; then
-            warn "Обновление баз rkhunter завершилось с ошибкой (возможно, сеть ограничена). Продолжаем."
-        else
-            success "Базы rkhunter обновлены."
-        fi
-    fi
-
-    # Email
-    local rkhunter_email=""
-    if confirm "Настроить email-уведомления для rkhunter?" "y"; then
-        while true; do
-            read -rp "$(echo -e "${YELLOW}Введите email для уведомлений: ${NC}")" rkhunter_email || break
-            if validate_email "$rkhunter_email"; then
-                break
-            fi
-        done
-
-        if ! command -v mail &>/dev/null; then
-            dry_run_or_exec "rkhunter" \
-                "mailutils будет установлен" \
-                "apt-get install -y -qq mailutils"
-        fi
-    fi
-
-    # Cron
-    if confirm "Настроить ежедневный скан rkhunter через cron?" "y"; then
-        if [[ "$DRY_RUN" == "true" ]]; then
-            show_ascii_dryrun "rkhunter" \
-                "Будет создана cron-задача для ежедневного сканирования" \
-                "cat > /etc/cron.daily/rkhunter-check"
-        else
-            mkdir -p /var/log/rkhunter
-            cat > /etc/cron.daily/rkhunter-check <<CRON
-#!/bin/bash
-LOG="/var/log/rkhunter/rkhunter-\$(date +%Y%m%d).log"
-REPORT="/var/log/rkhunter/rkhunter-report-\$(date +%Y%m%d).txt"
-echo "=== Проверка rkhunter: \$(date) ===" > "\$LOG"
-rkhunter --check --sk --quiet --report-warnings-only >> "\$LOG" 2>&1
-CRON
-            if [[ -n "$rkhunter_email" ]]; then
-                cat >> /etc/cron.daily/rkhunter-check <<CRON
-if grep -qi "warning\|suspect\|infected" "\$LOG"; then
-    echo "ALERT: rkhunter обнаружил предупреждения на \$(hostname)!" > "\$REPORT"
-    echo "Дата: \$(date)" >> "\$REPORT"
-    echo "Сервер: \$(hostname) (\$(hostname -I | awk '{print \$1}'))" >> "\$REPORT"
-    echo "" >> "\$REPORT"
-    grep -iE "warning|suspect|infected|found" "\$LOG" >> "\$REPORT" 2>/dev/null || true
-    mail -s "[BEZOPASnost] rkhunter Alert: \$(hostname) - предупреждения" "${rkhunter_email}" < "\$REPORT"
-fi
-CRON
-            fi
-            cat >> /etc/cron.daily/rkhunter-check <<'CRON'
-find /var/log/rkhunter -name "rkhunter-*" -mtime +30 -delete 2>/dev/null
-CRON
-            chmod +x /etc/cron.daily/rkhunter-check
-            success "Cron-задача rkhunter создана."
-            [[ -n "$rkhunter_email" ]] && success "Уведомления будут отправляться на: ${rkhunter_email}"
-        fi
-    fi
-
-    # Первый запуск
-    if [[ "$DRY_RUN" != "true" ]] && confirm "Запустить первый скан rkhunter сейчас? (занимает несколько минут)" "n"; then
-        warn "Запуск скана rkhunter..."
-        rkhunter --check --sk --quiet 2>&1 | tail -20
-        success "Скан rkhunter завершён."
-    fi
-
-    info "Полезные команды:"
-    echo -e "  ${CYAN}rkhunter --check --sk${NC}           - запустить скан (без пауз)"
-    echo -e "  ${CYAN}rkhunter --update${NC}               - обновить базы"
-    echo -e "  ${CYAN}rkhunter --check --report-warnings-only${NC} - только предупреждения"
-
-    save_state "rkhunter_configured" "yes"
-    success "Модуль 9 завершён."
-}
-
-# ======================================================================
 # МОДУЛЬ 10: Блокировка root
 # ======================================================================
 module_lock_root() {
@@ -1624,18 +1381,6 @@ do_rollback() {
         fi
     fi
 
-    # AIDE
-    if [[ -f "${backup_path}/aide.conf.bak" ]]; then
-        cp "${backup_path}/aide.conf.bak" /etc/aide/aide.conf
-        success "Конфигурация AIDE восстановлена."
-    fi
-
-    # rkhunter
-    if [[ -f "${backup_path}/rkhunter.conf.bak" ]]; then
-        cp "${backup_path}/rkhunter.conf.bak" /etc/rkhunter.conf
-        success "Конфигурация rkhunter восстановлена."
-    fi
-
     # Пользователь
     if [[ -f "${backup_path}/state.txt" ]]; then
         local user_created username
@@ -1648,12 +1393,6 @@ do_rollback() {
                 success "Пользователь '${username}' удалён."
             fi
         fi
-    fi
-
-    # Cron
-    if confirm "Удалить cron-задачи созданные этим скриптом (aide, rkhunter)?" "n"; then
-        rm -f /etc/cron.daily/aide-check /etc/cron.daily/rkhunter-check
-        success "Cron-задачи удалены."
     fi
 
     echo ""
@@ -1690,8 +1429,6 @@ show_report() {
         "ssh_keys_configured|Настроена авторизация по SSH-ключам" \
         "auto_updates|Включены автоматические обновления" \
         "ssh_audit|Аудит уязвимостей SSH выполнен" \
-        "aide_configured|Настроен AIDE (мониторинг целостности)" \
-        "rkhunter_configured|Настроен rkhunter (обнаружение руткитов)" \
         "root_locked|Пароль root заблокирован"; do
         key="${line%%|*}"
         desc="${line#*|}"
@@ -1713,64 +1450,8 @@ show_report() {
     echo -e "  3. Бэкапы: ${BACKUP_DIR}"
     echo -e "  4. Откат: ${CYAN}bash ${SCRIPT_NAME} --rollback${NC}"
     echo -e "  5. Откат из конкретного бэкапа: ${CYAN}bash ${SCRIPT_NAME} --rollback /path/to/backup${NC}"
-    echo -e "  6. AIDE: выполняйте ${CYAN}aide --check${NC} или ждите cron"
-    echo -e "  7. rkhunter: выполняйте ${CYAN}rkhunter --check --sk${NC} или ждите cron"
     divider
     echo ""
-}
-
-# ======================================================================
-# ТЕСТЫ ИЗ МЕНЮ
-# ======================================================================
-run_tests() {
-    header "ЗАПУСК ТЕСТОВ"
-
-    info "Скачивание и запуск тестов обработки ошибок..."
-    echo ""
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        show_ascii_dryrun "Тесты" \
-            "Тесты будут скачаны и запущены" \
-            "bash <(curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-error-handling.sh)"
-        return 0
-    fi
-
-    echo -e "${YELLOW}Выберите:${NC}"
-    echo -e "  ${CYAN}[1]${NC} Тесты обработки ошибок (test-error-handling.sh)"
-    echo -e "  ${CYAN}[2]${NC} Интеграционные тесты (test-integration.sh)"
-    echo -e "  ${CYAN}[3]${NC} Оба набора тестов"
-    echo ""
-
-    local choice
-    read -rp "$(echo -e "${BOLD}Ваш выбор: ${NC}")" choice || return 0
-
-    # Тесты подключают функции из vps-security.sh — скачаем его для source
-    local base_url="${SCRIPT_URL%/vps-security.sh}"
-    if [[ ! -f /tmp/vps-security.sh ]]; then
-        curl -s -o /tmp/vps-security.sh "$SCRIPT_URL" || true
-    fi
-
-    case "$choice" in
-        1)
-            bash <(curl -s "$base_url/test-error-handling.sh") 2>/dev/null || {
-                warn "Не удалось скачать тесты. Попробуйте вручную."
-                info "Скачайте: curl -O $base_url/test-error-handling.sh"
-            }
-            ;;
-        2)
-            bash <(curl -s "$base_url/test-integration.sh") 2>/dev/null || {
-                warn "Не удалось скачать тесты. Попробуйте вручную."
-            }
-            ;;
-        3)
-            bash <(curl -s "$base_url/test-error-handling.sh") 2>/dev/null || true
-            echo ""
-            bash <(curl -s "$base_url/test-integration.sh") 2>/dev/null || true
-            ;;
-        *)
-            error "Неверный выбор."
-            ;;
-    esac
 }
 
 # ======================================================================
@@ -1792,13 +1473,10 @@ show_menu() {
     echo -e "  ${CYAN}[5]${NC}   SSH-ключи и ужесточение настроек"
     echo -e "  ${CYAN}[6]${NC}   Автоматические обновления безопасности"
     echo -e "  ${CYAN}[7]${NC}   Аудит уязвимостей OpenSSH"
-    echo -e "  ${CYAN}[8]${NC}   AIDE — мониторинг целостности файлов (IDS)"
-    echo -e "  ${CYAN}[9]${NC}   rkhunter — обнаружение руткитов"
-    echo -e "  ${CYAN}[10]${NC}  Блокировка пароля root"
+    echo -e "  ${CYAN}[8]${NC}   Блокировка пароля root"
     echo ""
     echo -e "  ${CYAN}[D]${NC}   Переключить режим (демо/реальный)"
     echo -e "  ${CYAN}[R]${NC}   Откат изменений"
-    echo -e "  ${CYAN}[T]${NC}   Запустить тесты"
     echo -e "  ${CYAN}[A]${NC}   Запустить ВСЕ модули (интерактивно)"
     echo -e "  ${CYAN}[Q]${NC}   Выход"
     echo ""
@@ -1862,16 +1540,14 @@ main() {
         }
 
         case "${choice,,}" in
-            1)  module_create_user ;;
-            2)  module_firewall ;;
-            3)  module_fail2ban ;;
-            4)  module_ssh_port ;;
-            5)  module_ssh_keys ;;
-            6)  module_auto_updates ;;
-            7)  module_ssh_audit ;;
-            8)  module_aide ;;
-            9)  module_rkhunter ;;
-            10) module_lock_root ;;
+            1)  module_create_user || true ;;
+            2)  module_firewall || true ;;
+            3)  module_fail2ban || true ;;
+            4)  module_ssh_port || true ;;
+            5)  module_ssh_keys || true ;;
+            6)  module_auto_updates || true ;;
+            7)  module_ssh_audit || true ;;
+            8)  module_lock_root || true ;;
             d|D)
                 if [[ "$DRY_RUN" == "true" ]]; then
                     DRY_RUN=false
@@ -1888,22 +1564,17 @@ main() {
                 fi
                 ;;
             r|R)
-                do_rollback ""
-                ;;
-            t|T)
-                run_tests
+                do_rollback "" || true
                 ;;
             a|A)
-                module_create_user
-                module_ssh_port
-                module_ssh_keys
-                module_fail2ban
-                module_firewall
-                module_auto_updates
-                module_ssh_audit
-                module_aide
-                module_rkhunter
-                module_lock_root
+                module_create_user || true
+                module_ssh_port || true
+                module_ssh_keys || true
+                module_fail2ban || true
+                module_firewall || true
+                module_auto_updates || true
+                module_ssh_audit || true
+                module_lock_root || true
                 show_report
                 break
                 ;;
