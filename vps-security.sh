@@ -5,8 +5,9 @@
 # Версия: 2.0.0
 # =============================================================================
 
-# ponytail: при source (из тестов) только определяем функции, не выполняем main
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+# ponytail: при source (из тестов) только определяем функции, не выполняем main.
+# BASH_SOURCE[0] пуст при запуске из stdin (curl | bash) — это тоже main.
+if [[ -z "${BASH_SOURCE[0]}" || "${BASH_SOURCE[0]}" == "${0}" ]]; then
     set -euo pipefail
 fi
 
@@ -1710,8 +1711,8 @@ show_report() {
     fi
     echo -e "  2. Сохраните SSH-ключ в безопасности!"
     echo -e "  3. Бэкапы: ${BACKUP_DIR}"
-    echo -e "  4. Откат: ${CYAN}sudo bash ${SCRIPT_NAME} --rollback${NC}"
-    echo -e "  5. Откат из конкретного бэкапа: ${CYAN}sudo bash ${SCRIPT_NAME} --rollback /path/to/backup${NC}"
+    echo -e "  4. Откат: ${CYAN}bash ${SCRIPT_NAME} --rollback${NC}"
+    echo -e "  5. Откат из конкретного бэкапа: ${CYAN}bash ${SCRIPT_NAME} --rollback /path/to/backup${NC}"
     echo -e "  6. AIDE: выполняйте ${CYAN}aide --check${NC} или ждите cron"
     echo -e "  7. rkhunter: выполняйте ${CYAN}rkhunter --check --sk${NC} или ждите cron"
     divider
@@ -1834,7 +1835,7 @@ main() {
             ;;
         --help|-h)
             echo ""
-            echo "Использование: sudo bash $SCRIPT_NAME [опция]"
+            echo "Использование: bash $SCRIPT_NAME [опция]"
             echo ""
             echo "Опции:"
             echo "  (без опций)  Интерактивный режим"
@@ -1844,7 +1845,7 @@ main() {
             echo "  --help       Показать справку"
             echo ""
             echo "Быстрый запуск:"
-            echo "  curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh | sudo bash"
+            echo "  curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh | bash"
             echo ""
             exit 0
             ;;
@@ -1856,7 +1857,7 @@ main() {
         show_menu
         read -rp "$(echo -e "${BOLD}Ваш выбор: ${NC}")" choice || {
             echo ""
-            error "Нет доступного ввода. Используйте: sudo bash $SCRIPT_NAME"
+            error "Нет доступного ввода. Используйте: bash $SCRIPT_NAME"
             exit 1
         }
 
@@ -1922,6 +1923,6 @@ main() {
 }
 
 # ponytail: запускаем main только при прямом запуске; при source только определения
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+if [[ -z "${BASH_SOURCE[0]:-}" || "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi

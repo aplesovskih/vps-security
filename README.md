@@ -5,23 +5,23 @@
 ## Быстрая установка
 
 ```bash
-curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh | sudo bash
+curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh | bash
 ```
 
 ## Демо-режим (ничего не меняет)
 
 ```bash
-curl -sO https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh && sudo bash vps-security.sh --dry-run
+curl -sO https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh && bash vps-security.sh --dry-run
 ```
 
 ## Тесты
 
 ```bash
 # Тесты обработки ошибок
-curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-error-handling.sh | sudo bash
+curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-error-handling.sh | bash
 
 # Интеграционные тесты
-curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-integration.sh | sudo bash
+curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-integration.sh | bash
 ```
 
 ## Модули
@@ -64,7 +64,7 @@ curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-int
 ## Требования
 
 - Debian 10+ / Ubuntu 20.04+
-- Права root (`sudo`)
+- Права root
 - Подключение к интернету (для установки пакетов)
 
 ## Структура файлов
