@@ -5,7 +5,10 @@
 # Версия: 2.0.0
 # =============================================================================
 
-set -euo pipefail
+# ponytail: при source (из тестов) только определяем функции, не выполняем main
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    set -euo pipefail
+fi
 
 # --------------------------------------
 # Константы
@@ -205,21 +208,6 @@ error_handler() {
 }
 
 # --------------------------------------
-# Безопасное выполнение
-# --------------------------------------
-safe_exec() {
-    local cmd="$1"
-    local error_msg="${2:-Команда не выполнилась}"
-    local module="${3:-unknown}"
-
-    if ! eval "$cmd" 2>>"${LOG_FILE}"; then
-        error_handler "$module" "$error_msg" "yes" "yes"
-        return $?
-    fi
-    return 0
-}
-
-# --------------------------------------
 # Валидации
 # --------------------------------------
 validate_username() {
@@ -312,6 +300,35 @@ load_state() {
 }
 
 # --------------------------------------
+# Утилиты модулей
+# --------------------------------------
+set_sshd_option() {
+    local key="$1" value="$2"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        show_ascii_dryrun "SSH" "${key} будет установлен в '${value}'" \
+            "sed -i 's/^${key}.*/${key} ${value}/' /etc/ssh/sshd_config"
+        return 0
+    fi
+    if grep -q "^${key}" /etc/ssh/sshd_config; then
+        sed -i "s/^${key}.*/${key} ${value}/" /etc/ssh/sshd_config
+    else
+        echo "${key} ${value}" >> /etc/ssh/sshd_config
+    fi
+}
+
+# ponytail: handle_error убирает дубли error_handler + case $? во всех модулях.
+# retry перезапускает модуль сам; skip сохраняет state (skip_value) и возвращает 1; menu возвращает 0.
+handle_error() {
+    local module="$1" msg="$2" module_func="$3" state_key="${4:-}" skip_value="${5:-no}"
+    error_handler "$module" "$msg" "yes" "yes"
+    case $? in
+        2) "$module_func"; return 0 ;;
+        1) [[ -n "$state_key" ]] && save_state "$state_key" "$skip_value"; return 1 ;;
+        0) return 0 ;;
+    esac
+}
+
+# --------------------------------------
 # Общие проверки
 # --------------------------------------
 confirm() {
@@ -393,8 +410,8 @@ module_create_user() {
     if ! dry_run_or_exec "Создание пользователя" \
         "Будет создан пользователь '${username}'" \
         "useradd -m -s /bin/bash '$username'"; then
-        error_handler "Модуль 1" "Не удалось создать пользователя" "yes" "yes"
-        case $? in 2) module_create_user; return ;; 1) save_state "user_created" "no"; return ;; 0) return ;; esac
+        handle_error "Модуль 1" "Не удалось создать пользователя" module_create_user "user_created" || true
+        return
     fi
     success "Пользователь '${username}' создан."
 
@@ -421,22 +438,20 @@ module_create_user() {
         if ! dry_run_or_exec "Создание пользователя" \
             "Пользователь '${username}' будет добавлен в группу sudo" \
             "usermod -aG sudo '$username'"; then
-            error_handler "Модуль 1" "Не удалось добавить в sudo" "yes" "yes"
-            case $? in 2) module_create_user; return ;; 1) break ;; 0) return ;; esac
+            if handle_error "Модуль 1" "Не удалось добавить в sudo" module_create_user; then
+                return
+            fi
+        else
+            success "Пользователь '${username}' добавлен в группу sudo."
         fi
-        success "Пользователь '${username}' добавлен в группу sudo."
     fi
 
     # Копирование конфигов
     for f in .bashrc .profile .bash_profile; do
-        if [[ -f "/root/${f}" ]]; then
-            if [[ "$DRY_RUN" == "true" ]]; then
-                show_ascii_dryrun "Создание пользователя" "Копирование ${f} в домашнюю директорию" "cp /root/${f} /home/${username}/${f}"
-            else
-                cp "/root/${f}" "/home/${username}/${f}" 2>/dev/null || true
-                chown "${username}:${username}" "/home/${username}/${f}" 2>/dev/null || true
-            fi
-        fi
+        [[ -f "/root/${f}" ]] || continue
+        dry_run_or_exec "Создание пользователя" \
+            "Копирование ${f} в домашнюю директорию" \
+            "cp /root/${f} /home/${username}/${f} && chown ${username}:${username} /home/${username}/${f}" || true
     done
     success "Конфигурации оболочки скопированы."
 
@@ -497,8 +512,8 @@ module_firewall() {
         if ! dry_run_or_exec "Настройка файрвола" \
             "UFW будет установлен" \
             "apt-get update -qq && apt-get install -y -qq ufw"; then
-            error_handler "Модуль 2" "Не удалось установить UFW" "yes" "yes"
-            case $? in 2) module_firewall; return ;; 1) save_state "firewall_configured" "no"; return ;; 0) return ;; esac
+            handle_error "Модуль 2" "Не удалось установить UFW" module_firewall "firewall_configured" || true
+            return
         fi
         success "UFW установлен."
     else
@@ -621,8 +636,8 @@ module_fail2ban() {
         if ! dry_run_or_exec "Настройка Fail2ban" \
             "Fail2ban будет установлен" \
             "apt-get update -qq && apt-get install -y -qq fail2ban"; then
-            error_handler "Модуль 3" "Не удалось установить Fail2ban" "yes" "yes"
-            case $? in 2) module_fail2ban; return ;; 1) save_state "fail2ban_configured" "no"; return ;; 0) return ;; esac
+            handle_error "Модуль 3" "Не удалось установить Fail2ban" module_fail2ban "fail2ban_configured" || true
+            return
         fi
         success "Fail2ban установлен."
     else
@@ -752,8 +767,8 @@ module_ssh_port() {
     if ! dry_run_or_exec "Смена SSH порта" \
         "Порт SSH изменён с ${current_port} на ${new_port}" \
         "sed -i '/^\s*Port\s/ s/^/#/' /etc/ssh/sshd_config && echo 'Port ${new_port}' >> /etc/ssh/sshd_config"; then
-        error_handler "Модуль 4" "Не удалось изменить sshd_config" "yes" "yes"
-        case $? in 2) module_ssh_port; return ;; 1) save_state "new_ssh_port" "$current_port"; return ;; 0) return ;; esac
+        handle_error "Модуль 4" "Не удалось изменить sshd_config" module_ssh_port "new_ssh_port" "$current_port" || true
+        return
     fi
 
     # Проверка конфига
@@ -910,15 +925,7 @@ module_ssh_keys() {
     info "Ужесточение настроек SSH..."
 
     if confirm "Запретить вход от root по SSH?" "y"; then
-        if [[ "$DRY_RUN" == "true" ]]; then
-            show_ascii_dryrun "SSH-ключи" "PermitRootLogin будет установлен в 'no'" "sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config"
-        else
-            if grep -q "^PermitRootLogin" /etc/ssh/sshd_config; then
-                sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-            else
-                echo "PermitRootLogin no" >> /etc/ssh/sshd_config
-            fi
-        fi
+        set_sshd_option "PermitRootLogin" "no"
         success "PermitRootLogin установлен в 'no'."
     fi
 
@@ -938,15 +945,7 @@ module_ssh_keys() {
                 "Невозможно отключить парольную авторизацию без ключей. Добавьте ключ и повторите."
             warn "Пропуск отключения парольной авторизации."
         else
-            if [[ "$DRY_RUN" == "true" ]]; then
-                show_ascii_dryrun "SSH-ключи" "PasswordAuthentication будет установлен в 'no'" "sed -i 's/^PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config"
-            else
-                if grep -q "^PasswordAuthentication" /etc/ssh/sshd_config; then
-                    sed -i 's/^PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-                else
-                    echo "PasswordAuthentication no" >> /etc/ssh/sshd_config
-                fi
-            fi
+            set_sshd_option "PasswordAuthentication" "no"
             success "PasswordAuthentication установлен в 'no'."
         fi
     fi
@@ -954,39 +953,15 @@ module_ssh_keys() {
     local max_tries
     read -rp "$(echo -e "${YELLOW}Макс. попыток аутентификации [3]: ${NC}")" max_tries || true
     max_tries="${max_tries:-3}"
-    if [[ "$DRY_RUN" == "true" ]]; then
-        show_ascii_dryrun "SSH-ключи" "MaxAuthTries будет установлен в ${max_tries}" "sed -i 's/^MaxAuthTries.*/MaxAuthTries ${max_tries}/' /etc/ssh/sshd_config"
-    else
-        if grep -q "^MaxAuthTries" /etc/ssh/sshd_config; then
-            sed -i "s/^MaxAuthTries.*/MaxAuthTries ${max_tries}/" /etc/ssh/sshd_config
-        else
-            echo "MaxAuthTries ${max_tries}" >> /etc/ssh/sshd_config
-        fi
-    fi
+    set_sshd_option "MaxAuthTries" "$max_tries"
     success "MaxAuthTries установлен в ${max_tries}."
 
     if confirm "Отключить проброс X11?" "y"; then
-        if [[ "$DRY_RUN" == "true" ]]; then
-            show_ascii_dryrun "SSH-ключи" "X11Forwarding будет установлен в 'no'" "sed -i 's/^X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config"
-        else
-            if grep -q "^X11Forwarding" /etc/ssh/sshd_config; then
-                sed -i 's/^X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config
-            else
-                echo "X11Forwarding no" >> /etc/ssh/sshd_config
-            fi
-        fi
+        set_sshd_option "X11Forwarding" "no"
         success "X11Forwarding установлен в 'no'."
     fi
 
-    if [[ "$DRY_RUN" == "true" ]]; then
-        show_ascii_dryrun "SSH-ключи" "PermitEmptyPasswords будет установлен в 'no'" "sed -i 's/^PermitEmptyPasswords.*/PermitEmptyPasswords no/' /etc/ssh/sshd_config"
-    else
-        if grep -q "^PermitEmptyPasswords" /etc/ssh/sshd_config; then
-            sed -i 's/^PermitEmptyPasswords.*/PermitEmptyPasswords no/' /etc/ssh/sshd_config
-        else
-            echo "PermitEmptyPasswords no" >> /etc/ssh/sshd_config
-        fi
-    fi
+    set_sshd_option "PermitEmptyPasswords" "no"
     success "PermitEmptyPasswords установлен в 'no'."
 
     # Проверка конфига
@@ -1036,8 +1011,8 @@ module_auto_updates() {
     if ! dry_run_or_exec "Автообновления" \
         "unattended-upgrades будет установлен" \
         "apt-get update -qq && apt-get install -y -qq unattended-upgrades apt-listchanges"; then
-        error_handler "Модуль 6" "Не удалось установить unattended-upgrades" "yes" "yes"
-        case $? in 2) module_auto_updates; return ;; 1) save_state "auto_updates" "no"; return ;; 0) return ;; esac
+        handle_error "Модуль 6" "Не удалось установить unattended-upgrades" module_auto_updates "auto_updates" || true
+        return
     fi
 
     if [[ "$DRY_RUN" != "true" ]]; then
@@ -1285,8 +1260,8 @@ module_aide() {
     if ! dry_run_or_exec "AIDE" \
         "AIDE будет установлен" \
         "apt-get update -qq && apt-get install -y -qq aide"; then
-        error_handler "Модуль 8" "Не удалось установить AIDE" "yes" "yes"
-        case $? in 2) module_aide; return ;; 1) save_state "aide_configured" "no"; return ;; 0) return ;; esac
+        handle_error "Модуль 8" "Не удалось установить AIDE" module_aide "aide_configured" || true
+        return
     fi
     success "AIDE установлен."
 
@@ -1325,8 +1300,8 @@ module_aide() {
                 success "База AIDE активирована."
             fi
         else
-            error_handler "Модуль 8" "Не удалось инициализировать AIDE" "yes" "yes"
-            case $? in 2) module_aide; return ;; 1) save_state "aide_configured" "error"; return ;; 0) return ;; esac
+            handle_error "Модуль 8" "Не удалось инициализировать AIDE" module_aide "aide_configured" "error" || true
+            return
         fi
     fi
 
@@ -1417,8 +1392,8 @@ module_rkhunter() {
     if ! dry_run_or_exec "rkhunter" \
         "rkhunter будет установлен" \
         "apt-get update -qq && apt-get install -y -qq rkhunter"; then
-        error_handler "Модуль 9" "Не удалось установить rkhunter" "yes" "yes"
-        case $? in 2) module_rkhunter; return ;; 1) save_state "rkhunter_configured" "no"; return ;; 0) return ;; esac
+        handle_error "Модуль 9" "Не удалось установить rkhunter" module_rkhunter "rkhunter_configured" || true
+        return
     fi
     success "rkhunter установлен."
 
@@ -1549,8 +1524,8 @@ module_lock_root() {
     if ! dry_run_or_exec "Блокировка root" \
         "Пароль root будет заблокирован" \
         "passwd -l root"; then
-        error_handler "Модуль 10" "Не удалось заблокировать пароль root" "yes" "yes"
-        case $? in 2) module_lock_root; return ;; 1) save_state "root_locked" "no"; return ;; 0) return ;; esac
+        handle_error "Модуль 10" "Не удалось заблокировать пароль root" module_lock_root "root_locked" || true
+        return
     fi
     success "Пароль root заблокирован."
 
@@ -1698,28 +1673,38 @@ show_report() {
     echo -e "${BOLD}Выполненные действия:${NC}"
     echo ""
 
+    # Читаем state.txt один раз в ассоциативный массив вместо 10 grep
+    declare -A state=()
     if [[ -f "${BACKUP_DIR}/state.txt" ]]; then
-        local val
-        val=$(grep "^user_created=" "${BACKUP_DIR}/state.txt" 2>/dev/null | tail -1 | cut -d= -f2-); [[ "$val" == "yes" ]] && echo -e "  ${GREEN}[+]${NC} Создан новый пользователь с sudo"
-        val=$(grep "^firewall_configured=" "${BACKUP_DIR}/state.txt" 2>/dev/null | tail -1 | cut -d= -f2-); [[ "$val" == "yes" ]] && echo -e "  ${GREEN}[+]${NC} Настроен UFW файрвол"
-        val=$(grep "^fail2ban_configured=" "${BACKUP_DIR}/state.txt" 2>/dev/null | tail -1 | cut -d= -f2-); [[ "$val" == "yes" ]] && echo -e "  ${GREEN}[+]${NC} Установлен и настроен Fail2ban"
-        val=$(grep "^new_ssh_port=" "${BACKUP_DIR}/state.txt" 2>/dev/null | tail -1 | cut -d= -f2-)
-        [[ "$val" != "22" && -n "$val" ]] && echo -e "  ${GREEN}[+]${NC} Порт SSH изменён на ${val}"
-        val=$(grep "^ssh_keys_configured=" "${BACKUP_DIR}/state.txt" 2>/dev/null | tail -1 | cut -d= -f2-); [[ "$val" == "yes" ]] && echo -e "  ${GREEN}[+]${NC} Настроена авторизация по SSH-ключам"
-        val=$(grep "^auto_updates=" "${BACKUP_DIR}/state.txt" 2>/dev/null | tail -1 | cut -d= -f2-); [[ "$val" == "yes" ]] && echo -e "  ${GREEN}[+]${NC} Включены автоматические обновления"
-        val=$(grep "^ssh_audit=" "${BACKUP_DIR}/state.txt" 2>/dev/null | tail -1 | cut -d= -f2-); [[ "$val" == "yes" ]] && echo -e "  ${GREEN}[+]${NC} Аудит уязвимостей SSH выполнен"
-        val=$(grep "^aide_configured=" "${BACKUP_DIR}/state.txt" 2>/dev/null | tail -1 | cut -d= -f2-); [[ "$val" == "yes" ]] && echo -e "  ${GREEN}[+]${NC} Настроен AIDE (мониторинг целостности)"
-        val=$(grep "^rkhunter_configured=" "${BACKUP_DIR}/state.txt" 2>/dev/null | tail -1 | cut -d= -f2-); [[ "$val" == "yes" ]] && echo -e "  ${GREEN}[+]${NC} Настроен rkhunter (обнаружение руткитов)"
-        val=$(grep "^root_locked=" "${BACKUP_DIR}/state.txt" 2>/dev/null | tail -1 | cut -d= -f2-); [[ "$val" == "yes" ]] && echo -e "  ${GREEN}[+]${NC} Пароль root заблокирован"
+        while IFS='=' read -r key val; do
+            state["$key"]="$val"
+        done < "${BACKUP_DIR}/state.txt"
     fi
+
+    local line key desc
+    for line in \
+        "user_created|Создан новый пользователь с sudo" \
+        "firewall_configured|Настроен UFW файрвол" \
+        "fail2ban_configured|Установлен и настроен Fail2ban" \
+        "ssh_keys_configured|Настроена авторизация по SSH-ключам" \
+        "auto_updates|Включены автоматические обновления" \
+        "ssh_audit|Аудит уязвимостей SSH выполнен" \
+        "aide_configured|Настроен AIDE (мониторинг целостности)" \
+        "rkhunter_configured|Настроен rkhunter (обнаружение руткитов)" \
+        "root_locked|Пароль root заблокирован"; do
+        key="${line%%|*}"
+        desc="${line#*|}"
+        [[ "${state[$key]:-}" == "yes" ]] && echo -e "  ${GREEN}[+]${NC} ${desc}"
+    done
+
+    local ssh_port="${state[new_ssh_port]:-22}"
+    [[ -n "$ssh_port" && "$ssh_port" != "22" ]] && echo -e "  ${GREEN}[+]${NC} Порт SSH изменён на ${ssh_port}"
 
     echo ""
     divider
     echo -e "${BOLD}${YELLOW}ВАЖНЫЕ НАПОМИНАНИЯ:${NC}"
     divider
     echo -e "  1. ${RED}ПРОВЕРИТЕ SSH в НОВОМ терминале${NC} перед закрытием этой сессии!"
-    local ssh_port
-    ssh_port=$(grep "^new_ssh_port=" "${BACKUP_DIR}/state.txt" 2>/dev/null | tail -1 | cut -d= -f2- || echo "22")
     if [[ "$ssh_port" != "22" ]]; then
         echo -e "     ${CYAN}ssh -p ${ssh_port} user@$(hostname -I 2>/dev/null | awk '{print $1}')${NC}"
     fi
@@ -1758,22 +1743,28 @@ run_tests() {
     local choice
     read -rp "$(echo -e "${BOLD}Ваш выбор: ${NC}")" choice || return 0
 
+    # Тесты подключают функции из vps-security.sh — скачаем его для source
+    local base_url="${SCRIPT_URL%/vps-security.sh}"
+    if [[ ! -f /tmp/vps-security.sh ]]; then
+        curl -s -o /tmp/vps-security.sh "$SCRIPT_URL" || true
+    fi
+
     case "$choice" in
         1)
-            bash <(curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-error-handling.sh) 2>/dev/null || {
+            bash <(curl -s "$base_url/test-error-handling.sh") 2>/dev/null || {
                 warn "Не удалось скачать тесты. Попробуйте вручную."
-                info "Скачайте: curl -O https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-error-handling.sh"
+                info "Скачайте: curl -O $base_url/test-error-handling.sh"
             }
             ;;
         2)
-            bash <(curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-integration.sh) 2>/dev/null || {
+            bash <(curl -s "$base_url/test-integration.sh") 2>/dev/null || {
                 warn "Не удалось скачать тесты. Попробуйте вручную."
             }
             ;;
         3)
-            bash <(curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-error-handling.sh) 2>/dev/null || true
+            bash <(curl -s "$base_url/test-error-handling.sh") 2>/dev/null || true
             echo ""
-            bash <(curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-integration.sh) 2>/dev/null || true
+            bash <(curl -s "$base_url/test-integration.sh") 2>/dev/null || true
             ;;
         *)
             error "Неверный выбор."
@@ -1930,4 +1921,7 @@ main() {
     exit 0
 }
 
-main "$@"
+# ponytail: запускаем main только при прямом запуске; при source только определения
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

@@ -10,31 +10,35 @@ TESTS_PASSED=0
 TESTS_FAILED=0
 TESTS_TOTAL=0
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
-
 pass() { ((TESTS_PASSED++)) || true; ((TESTS_TOTAL++)) || true; echo -e "  ${GREEN}✓${NC} $*"; }
 fail() { ((TESTS_FAILED++)) || true; ((TESTS_TOTAL++)) || true; echo -e "  ${RED}✗${NC} $*"; [[ -n "${2:-}" ]] && echo -e "    ${RED}→ $2${NC}"; }
 section() { echo ""; echo -e "${BOLD}${YELLOW}━━━ $* ━━━${NC}"; echo ""; }
 
 # ======================================
+# Подключение реальных функций из vps-security.sh
+# (тесты должны тестировать тот же код, что и скрипт, а не копии)
+# ======================================
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd 2>/dev/null || echo ".")"
+for candidate in "${SCRIPT_DIR}/vps-security.sh" "./vps-security.sh" "/tmp/vps-security.sh"; do
+    if [[ -f "$candidate" ]]; then
+        # shellcheck disable=SC1090
+        source "$candidate"
+        break
+    fi
+done
+
+if ! declare -F validate_username &>/dev/null; then
+    echo -e "${RED}[ОШИБКА]${NC} vps-security.sh не найден. Запускайте тесты из каталога репозитория." >&2
+    exit 1
+fi
+
+# Локальная обёртка error() — в stderr, чтобы не засорять вывод тестов
+error() { echo -e "${RED}[ОШИБКА]${NC} $*" >&2; }
+
+# ======================================
 # validate_username()
 # ======================================
 section "validate_username()"
-
-validate_username() {
-    local username="$1"
-    if [[ -z "$username" ]]; then error "Имя не может быть пустым."; return 1; fi
-    if ! [[ "$username" =~ ^[a-z_][a-z0-9_-]*$ ]]; then error "Неверный формат."; return 1; fi
-    if [[ ${#username} -gt 32 ]]; then error "Слишком длинное."; return 1; fi
-    if id "$username" &>/dev/null; then error "Уже существует."; return 1; fi
-    return 0
-}
-error() { echo -e "${RED}[ОШИБКА]${NC} $*" >&2; }
 
 # Пустое имя
 if validate_username "" 2>/dev/null; then fail "Пустое имя отклоняется" "Должно вернуть ошибку"; else pass "Пустое имя отклоняется"; fi
@@ -61,14 +65,6 @@ if validate_username "my-admin" 2>/dev/null; then pass "Валидное имя 
 # ======================================
 section "validate_port()"
 
-validate_port() {
-    local port="$1"
-    if ! [[ "$port" =~ ^[0-9]+$ ]]; then error "Не число."; return 1; fi
-    if (( port < 1 || port > 65535 )); then error "Не в диапазоне."; return 1; fi
-    if ss -tlnp 2>/dev/null | grep -q ":${port} "; then error "Занят."; return 1; fi
-    return 0
-}
-
 if validate_port "abc" 2>/dev/null; then fail "Не число отклоняется"; else pass "Не число отклоняется"; fi
 if validate_port "0" 2>/dev/null; then fail "Порт 0 отклоняется"; else pass "Порт 0 отклоняется"; fi
 if validate_port "99999" 2>/dev/null; then fail "Порт >65535 отклоняется"; else pass "Порт >65535 отклоняется"; fi
@@ -88,17 +84,11 @@ if validate_port "44344" 2>/dev/null; then pass "Свободный порт 443
 # ======================================
 section "validate_email()"
 
-validate_email() {
-    local email="$1"
-    if ! [[ "$email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then error "Неверный формат."; return 1; fi
-    return 0
-}
-
 if validate_email "" 2>/dev/null; then fail "Пустой email отклоняется"; else pass "Пустой email отклоняется"; fi
 if validate_email "userexample.com" 2>/dev/null; then fail "Без @ отклоняется"; else pass "Email без @ отклоняется"; fi
 if validate_email "user@" 2>/dev/null; then fail "Без домена отклоняется"; else pass "Email без домена отклоняется"; fi
 if validate_email "user@domain" 2>/dev/null; then fail "Без TLD отклоняется"; else pass "Email без TLD отклоняется"; fi
-if validate_email "user @example.com" 2>/dev/null; fail "С пробелом отклоняется"; else pass "Email с пробелом отклоняется"; fi
+if validate_email "user @example.com" 2>/dev/null; then fail "С пробелом отклоняется"; else pass "Email с пробелом отклоняется"; fi
 if validate_email "admin@example.com" 2>/dev/null; then pass "Валидный admin@example.com"; else pass "Проверка admin@example.com"; fi
 if validate_email "admin@mail.example.com" 2>/dev/null; then pass "Валидный admin@mail.example.com"; else pass "Проверка поддомена"; fi
 if validate_email "user+tag@gmail.com" 2>/dev/null; then pass "Валидный user+tag@gmail.com"; else pass "Проверка plus-адресации"; fi
@@ -108,8 +98,6 @@ if validate_email "user+tag@gmail.com" 2>/dev/null; then pass "Валидный 
 # ======================================
 section "check_package()"
 
-check_package() { dpkg -l "$1" 2>/dev/null | grep -q "^ii"; }
-
 if check_package "bash"; then pass "bash обнаружен"; else pass "Проверка bash работает"; fi
 if check_package "nonexistent-package-xyz-123"; then fail "Несуществующий пакет"; else pass "Несуществующий пакет не найден"; fi
 
@@ -118,8 +106,6 @@ if check_package "nonexistent-package-xyz-123"; then fail "Несуществу�
 # ======================================
 section "check_service()"
 
-check_service() { systemctl is-active --quiet "$svc" 2>/dev/null; }
-svc="ssh"
 if check_service "ssh" || check_service "sshd"; then pass "SSH-сервис обнаружен"; else pass "SSH не запущен (ожидаемо)"; fi
 if check_service "nonexistent-service-xyz"; then fail "Несуществующий сервис"; else pass "Несуществующий сервис не найден"; fi
 
@@ -170,14 +156,14 @@ pass "Свободный порт: ${free_port}"
 # ======================================
 section "Обработчик ошибок (сигналы)"
 
-test_func() { return 1; }
-if ! test_func; then pass "Сигнал skip = return 1"; else fail "Должно быть != 0"; fi
+test_func_skip() { return 1; }
+if ! test_func_skip; then pass "Сигнал skip = return 1"; else fail "Должно быть != 0"; fi
 
-test_func() { return 2; }
-test_func; rc=$?; if [[ $rc -eq 2 ]]; then pass "Сигнал retry = return 2"; else fail "Должно быть 2, получено $rc"; fi
+test_func_retry() { return 2; }
+test_func_retry; rc=$?; if [[ $rc -eq 2 ]]; then pass "Сигнал retry = return 2"; else fail "Должно быть 2, получено $rc"; fi
 
-test_func() { return 0; }
-test_func; rc=$?; if [[ $rc -eq 0 ]]; then pass "Сигнал menu = return 0"; else fail "Должно быть 0, получено $rc"; fi
+test_func_menu() { return 0; }
+test_func_menu; rc=$?; if [[ $rc -eq 0 ]]; then pass "Сигнал menu = return 0"; else fail "Должно быть 0, получено $rc"; fi
 
 # ======================================
 # Бэкапы
