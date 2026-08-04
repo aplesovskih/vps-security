@@ -1,0 +1,22 @@
+{
+  "test-error-handling.sh": {
+    "mtime": 1785142033.3499148,
+    "ast_hash": "d73aa04dd438e04662b2693730980215",
+    "semantic_hash": "d73aa04dd438e04662b2693730980215"
+  },
+  "test-integration.sh": {
+    "mtime": 1785142092.1979148,
+    "ast_hash": "343e90a5fafa2757f899e149c609ce23",
+    "semantic_hash": "343e90a5fafa2757f899e149c609ce23"
+  },
+  "vps-security.sh": {
+    "mtime": 1785160728.9812882,
+    "ast_hash": "05e7b4739c7f25d6194e6f805bca3faf",
+    "semantic_hash": "05e7b4739c7f25d6194e6f805bca3faf"
+  },
+  "README.md": {
+    "mtime": 1785146516.5332937,
+    "ast_hash": "55a96091844a75a5fd4ee63c7a031eba",
+    "semantic_hash": "55a96091844a75a5fd4ee63c7a031eba"
+  }
+}
