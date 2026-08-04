@@ -1,6 +1,6 @@
 # VPS Security Hardening Script
 
-Интерактивный скрипт настройки безопасности VPS на Debian. Полностью на русском языке.
+Интерактивный скрипт настройки безопасности VPS на Debian. Полностью на русском языке. 8 модулей.
 
 ## Быстрая установка
 
@@ -14,16 +14,6 @@ curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-secu
 curl -sO https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh && bash vps-security.sh --dry-run
 ```
 
-## Тесты
-
-```bash
-# Тесты обработки ошибок
-curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-error-handling.sh | bash
-
-# Интеграционные тесты
-curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-integration.sh | bash
-```
-
 ## Модули
 
 | # | Модуль | Описание |
@@ -35,9 +25,7 @@ curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-int
 | 5 | SSH-ключи | Авторизация по ключам + ужесточение настроек |
 | 6 | Автообновления | unattended-upgrades (только обновления безопасности) |
 | 7 | SSH аудит | Проверка CVE (Terrapin, regreSSHion) и слабых шифров |
-| 8 | AIDE | Мониторинг целостности файлов (IDS) |
-| 9 | rkhunter | Обнаружение руткитов |
-| 10 | Блокировка root | Отключение парольного входа от root |
+| 8 | Блокировка root | Отключение парольного входа от root |
 
 ## Опции запуска
 
@@ -58,7 +46,6 @@ curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-int
 - **Резервные копии** — автоматический бэкап перед каждым изменением
 - **Откат** — полный откат всех изменений из бэкапов
 - **Логирование** — все действия в `/var/log/vps-security-*.log`
-- **Email-уведомления** — AIDE и rkhunter отправляют отчёты на почту
 - **ASCII-арт** — наглядные сообщения об ошибках и успехе
 
 ## Требования
@@ -72,8 +59,6 @@ curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/test-int
 ```
 vps-security/
 ├── vps-security.sh            # Основной скрипт
-├── test-error-handling.sh     # Тесты обработки ошибок
-├── test-integration.sh        # Интеграционные тесты
 ├── README.md                  # Эта документация
 └── LICENSE                    # MIT лицензия
 ```
