@@ -70,10 +70,12 @@ log() {
     echo "[${timestamp}] [${level}] $*" >> "${LOG_FILE}" 2>/dev/null || true
 }
 
+# ВАЖНО: error/warn пишут в stderr, чтобы не попадать в $( ) command substitution
+# (иначе сообщения валидации порта попали бы в new_port и испортили sshd_config)
 info()    { echo -e "${BLUE}[ИНФО]${NC} $*";  log "INFO" "$*"; }
 success() { echo -e "${GREEN}[ОК]${NC} $*";    log "OK" "$*"; }
-warn()    { echo -e "${YELLOW}[ВНИМ]${NC} $*"; log "WARN" "$*"; }
-error()   { echo -e "${RED}[ОШИБКА]${NC} $*";  log "ERROR" "$*"; }
+warn()    { echo -e "${YELLOW}[ВНИМ]${NC} $*" >&2; log "WARN" "$*"; }
+error()   { echo -e "${RED}[ОШИБКА]${NC} $*" >&2;  log "ERROR" "$*"; }
 
 header() {
     echo ""
@@ -255,8 +257,32 @@ validate_username() {
     return 0
 }
 
+# Известные сервисные порты, которые нельзя использовать для SSH
+# (порт и имя сервиса через двоеточие)
+RESERVED_SSH_PORTS=(20:ftp-data 21:ftp 23:telnet 25:smtp 53:dns 67:dhcp 68:dhcp \
+    69:tftp 80:http 110:pop3 111:rpcbind 123:ntp 135:ms-rpc 137:netbios-ns \
+    138:netbios-dgm 139:netbios-ssn 143:imap 161:snmp 162:snmptrap 179:bgp \
+    389:ldap 443:https 445:microsoft-ds 465:smtps 514:syslog 587:submission \
+    631:ipp 636:ldaps 873:rsync 993:imaps 995:pop3s 1080:socks 1194:openvpn \
+    1433:mssql 1521:oracle 2049:nfs 2375:docker 2376:docker-tls 3306:mysql \
+    3389:rdp 5432:postgresql 5900:vnc 6379:redis 6443:k8s-api 8080:http-alt \
+    8443:https-alt 9200:elasticsearch 9300:elasticsearch 11211:memcached \
+    27017:mongodb 50000:sap)
+
+is_reserved_ssh_port() {
+    local port="$1" entry
+    for entry in "${RESERVED_SSH_PORTS[@]}"; do
+        if [[ "$port" == "${entry%%:*}" ]]; then
+            echo "${entry#*:}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 validate_port() {
     local port="$1"
+    local for_ssh="${2:-no}"
     if ! [[ "$port" =~ ^[0-9]+$ ]]; then
         error "Порт должен быть числом."
         return 1
@@ -264,6 +290,17 @@ validate_port() {
     if (( port < 1 || port > 65535 )); then
         error "Порт должен быть от 1 до 65535."
         return 1
+    fi
+    # Для SSH-порта запрещаем известные сервисные порты (23, 80, 443 и т.д.)
+    if [[ "$for_ssh" == "ssh" ]]; then
+        local svc
+        if svc=$(is_reserved_ssh_port "$port"); then
+            error "Порт ${port} зарезервирован для сервиса ${svc}. Выберите другой, например 22022."
+            return 1
+        fi
+        if (( port < 1024 )); then
+            warn "Порт ${port} — привилегированный (<1024). Рекомендуется выбрать порт из диапазона 1024-65535."
+        fi
     fi
     if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
         local process
@@ -429,10 +466,11 @@ confirm() {
 
 ask_port() {
     local prompt="$1"
+    local for_ssh="${2:-no}"
     local port
     while true; do
         read -rp "$(echo -e "${YELLOW}${prompt}${NC}")" port || return 1
-        if validate_port "$port"; then
+        if validate_port "$port" "$for_ssh"; then
             echo "$port"
             return 0
         fi
@@ -840,7 +878,7 @@ module_ssh_port() {
     fi
 
     local new_port
-    if ! new_port=$(ask_port "Введите новый порт SSH: "); then
+    if ! new_port=$(ask_port "Введите новый порт SSH: " ssh); then
         warn "Ввод отменён. Порт SSH не изменён."
         save_state "new_ssh_port" "$current_port"
         return 0
