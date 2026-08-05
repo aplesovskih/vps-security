@@ -1,6 +1,6 @@
 # VPS Security Hardening Script
 
-Интерактивный скрипт настройки безопасности VPS на Debian. Полностью на русском языке. 8 модулей.
+Интерактивный скрипт настройки безопасности VPS на Debian. Полностью на русском языке. 10 модулей.
 
 ## Быстрая установка
 
@@ -28,6 +28,8 @@ curl -sO https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-sec
 | 6 | Автообновления | unattended-upgrades (только обновления безопасности) |
 | 7 | SSH аудит | Проверка CVE (Terrapin, regreSSHion) и слабых шифров |
 | 8 | Блокировка root | Отключение парольного входа от root |
+| 9 | Безопасные /tmp | Монтирование /tmp и /dev/shm с nodev,nosuid,noexec |
+| 10 | CrowdSec | Коллективная защита от брутфорса и атак (общая база угроз) |
 
 ## Опции запуска
 

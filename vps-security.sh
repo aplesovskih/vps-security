@@ -2,7 +2,7 @@
 # =============================================================================
 # Скрипт настройки безопасности VPS для Debian
 # Интерактивная настройка с откатом и логированием
-# Версия: 2.0.0
+# Версия: 2.1.0
 # =============================================================================
 
 # ponytail: при source (из тестов) только определяем функции, не выполняем main.
@@ -14,7 +14,7 @@ fi
 # --------------------------------------
 # Константы
 # --------------------------------------
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.1.0"
 # При curl | bash $0 = "bash" — для подсказок используем реальное имя скрипта
 SCRIPT_NAME="$(basename "$0")"
 case "$SCRIPT_NAME" in
@@ -1071,6 +1071,66 @@ module_ssh_keys() {
     set_sshd_option "PermitEmptyPasswords" "no"
     success "PermitEmptyPasswords установлен в 'no'."
 
+    # --- Расширенный харденинг ---
+    info "Дополнительное ужесточение настроек SSH..."
+
+    # LogLevel VERBOSE — детальное логирование входов
+    set_sshd_option "LogLevel" "VERBOSE"
+    success "LogLevel установлен в VERBOSE (детальные логи входов)."
+
+    # KbdInteractiveAuthentication no — защита от фишинга паролей
+    set_sshd_option "KbdInteractiveAuthentication" "no"
+    success "KbdInteractiveAuthentication установлен в 'no'."
+
+    # MaxSessions — ограничение одновременных сессий
+    set_sshd_option "MaxSessions" "5"
+    success "MaxSessions установлен в 5."
+
+    # ClientAlive — автоматический разрыв неактивных сессий
+    set_sshd_option "ClientAliveInterval" "300"
+    set_sshd_option "ClientAliveCountMax" "2"
+    success "Неактивные сессии будут разрываться (ClientAliveInterval=300, CountMax=2)."
+
+    # AllowUsers — доступ только с указанных IP
+    if confirm "Ограничить вход по IP (AllowUsers пользователь@IP)? Блокирует все остальные адреса" "n"; then
+        local allow_users
+        read -rp "$(echo -e "${YELLOW}Список 'пользователь@IP' через пробел (например: admin@1.2.3.4): ${NC}")" allow_users || true
+
+        # Валидация каждого токена: имя или имя@IP
+        local valid=true token
+        for token in $allow_users; do
+            if ! [[ "$token" =~ ^[A-Za-z0-9._-]+(@[0-9A-Za-z:./_-]+)?$ ]]; then
+                valid=false
+                error "Недопустимый токен AllowUsers: '${token}'"
+            fi
+        done
+
+        if [[ -n "$allow_users" ]] && [[ "$valid" == "true" ]]; then
+            set_sshd_option "AllowUsers" "$allow_users"
+            success "AllowUsers: ${allow_users}"
+            warn "Вход с других IP теперь будет отклонён! Проверьте доступ в НОВОМ терминале, не закрывая текущий."
+        else
+            warn "AllowUsers не применён (пустой ввод или неверный формат)."
+        fi
+    fi
+
+    # Banner — предупреждение при входе
+    if confirm "Добавить баннер предупреждения при входе по SSH?" "n"; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            show_ascii_dryrun "SSH-ключи" "Будет создан /etc/ssh/banner.txt и включён Banner" "cat > /etc/ssh/banner.txt && set_sshd_option Banner"
+        else
+            cat > /etc/ssh/banner.txt <<'BANNER'
+======================================================================
+  ВНИМАНИЕ! Доступ только для авторизованных пользователей.
+  Все действия на этом сервере протоколируются и могут быть
+  использованы в качестве доказательств.
+======================================================================
+BANNER
+            set_sshd_option "Banner" "/etc/ssh/banner.txt"
+            success "Баннер создан и включён."
+        fi
+    fi
+
     # Проверка конфига
     if [[ "$DRY_RUN" != "true" ]]; then
         if sshd -t 2>/dev/null; then
@@ -1447,6 +1507,149 @@ module_lock_root() {
     fi
 
     save_state "root_locked" "yes"
+    success "Модуль 8 завершён."
+}
+
+# ======================================================================
+# МОДУЛЬ 9: Безопасные монтирования /tmp и /dev/shm
+# ======================================================================
+module_mount_hardening() {
+    header "МОДУЛЬ 9: Безопасные монтирования (/tmp, /dev/shm)"
+
+    if ! confirm "Настроить безопасные монтирования /tmp и /dev/shm?"; then
+        info "Пропуск безопасных монтирований."
+        save_state "mount_hardening" "no"
+        return 0
+    fi
+
+    show_ascii_warning "Будут добавлены опции nodev,nosuid,noexec (запрет запуска файлов из /tmp)."
+    warn "Некоторые приложения, выполняющие файлы из /tmp, могут перестать работать!"
+
+    # Текущее состояние
+    info "Текущие опции монтирования:"
+    if command -v findmnt &>/dev/null; then
+        findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS /tmp /dev/shm 2>/dev/null | column -t 2>/dev/null || true
+    else
+        echo "  (findmnt недоступен)"
+    fi
+    echo ""
+
+    backup_file "/etc/fstab"
+
+    # --- /dev/shm ---
+    local shm_entry="tmpfs /dev/shm tmpfs defaults,nodev,nosuid,noexec,nofail,mode=1777 0 0"
+    info "Настройка /dev/shm..."
+    if grep -qE "^tmpfs[[:space:]]+/dev/shm" /etc/fstab 2>/dev/null; then
+        info "/dev/shm уже настроен в /etc/fstab."
+    else
+        if [[ "$DRY_RUN" == "true" ]]; then
+            show_ascii_dryrun "Монтирования" "Запись для /dev/shm будет добавлена в /etc/fstab" "echo '${shm_entry}' >> /etc/fstab"
+        else
+            echo "$shm_entry" >> /etc/fstab
+            success "/dev/shm: добавлена запись в fstab с nodev,nosuid,noexec (nofail)."
+            warn "Применится после перезагрузки (немедленный remount может прервать активные приложения)."
+        fi
+    fi
+
+    # --- /tmp ---
+    info "Настройка /tmp..."
+    local tmp_fs
+    tmp_fs=$(findmnt -n -o FSTYPE /tmp 2>/dev/null || echo "")
+
+    if [[ "$tmp_fs" == "tmpfs" ]]; then
+        # /tmp — tmpfs, управляемый systemd (tmp.mount): применяем drop-in
+        info "/tmp на tmpfs (systemd) — применяем drop-in для tmp.mount."
+        if [[ "$DRY_RUN" == "true" ]]; then
+            show_ascii_dryrun "Монтирования" "Будет создан /etc/systemd/system/tmp.mount.d/security.conf" "cat > /etc/systemd/system/tmp.mount.d/security.conf"
+        else
+            mkdir -p /etc/systemd/system/tmp.mount.d
+            cat > /etc/systemd/system/tmp.mount.d/security.conf <<'CONF'
+[Mount]
+Options=mode=1777,nodev,nosuid,noexec
+CONF
+            systemctl daemon-reload 2>/dev/null || true
+            success "/tmp: systemd drop-in применён (nodev,nosuid,noexec)."
+            warn "Применится после перезагрузки."
+        fi
+    elif grep -qE "[[:space:]]/tmp[[:space:]]" /etc/fstab 2>/dev/null; then
+        # /tmp — раздел на диске с записью в fstab: добавляем опции к существующей строке
+        warn "/tmp — раздел на диске. Добавляем опции к строке fstab (без дублирования)."
+        if [[ "$DRY_RUN" == "true" ]]; then
+            show_ascii_dryrun "Монтирования" "Опции nodev,nosuid,noexec будут добавлены к строке /tmp в fstab" "awk-обработка строки /tmp в /etc/fstab"
+        else
+            awk 'BEGIN{OFS="\t"} $2=="/tmp" && $4 !~ /noexec/ { $4=$4",nodev,nosuid,noexec" } {print}' /etc/fstab > /tmp/fstab.new && mv /tmp/fstab.new /etc/fstab
+            success "/tmp: опции добавлены к строке fstab (nodev,nosuid,noexec)."
+            warn "Применится после перезагрузки."
+        fi
+    else
+        warn "/tmp не найден в fstab и не является tmpfs — пропуск."
+    fi
+
+    save_state "mount_hardening" "yes"
+    success "Модуль 9 завершён."
+    warn "Перезагрузите сервер, чтобы применить опции монтирования."
+}
+
+# ======================================================================
+# МОДУЛЬ 10: CrowdSec — коллективная защита
+# ======================================================================
+module_crowdsec() {
+    header "МОДУЛЬ 10: CrowdSec (коллективная защита от атак)"
+
+    if ! confirm "Установить CrowdSec (совместная защита от брутфорса и атак)?"; then
+        info "Пропуск CrowdSec."
+        save_state "crowdsec_installed" "no"
+        return 0
+    fi
+
+    info "CrowdSec — Fail2ban нового поколения: общая база угроз сообщества."
+    info "IP, атакующие другие серверы по всему миру, блокируются и у вас ещё до атаки."
+
+    # Выбор bouncer: при активном UFW (nftables-бэкенд) конфликт возможен — используем iptables
+    local bouncer_pkg="crowdsec-firewall-bouncer-nftables"
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        warn "Обнаружен активный UFW. Используем iptables-bouncer во избежание конфликта правил."
+        bouncer_pkg="crowdsec-firewall-bouncer-iptables"
+    fi
+
+    # Установка
+    if command -v cscli &>/dev/null; then
+        info "CrowdSec уже установлен."
+    else
+        info "Установка CrowdSec и firewall-bouncer..."
+        if ! dry_run_or_exec "CrowdSec" \
+            "CrowdSec будет установлен (официальный репозиторий)" \
+            "curl -s https://install.crowdsec.net | sh"; then
+            handle_error "Модуль 10" "Не удалось добавить репозиторий CrowdSec" module_crowdsec "crowdsec_installed" || true
+            return
+        fi
+        if ! dry_run_or_exec "CrowdSec" \
+            "Пакеты crowdsec и ${bouncer_pkg} будут установлены" \
+            "apt-get update -qq && apt-get install -y -qq crowdsec ${bouncer_pkg}"; then
+            handle_error "Модуль 10" "Не удалось установить CrowdSec" module_crowdsec "crowdsec_installed" || true
+            return
+        fi
+        success "CrowdSec установлен."
+    fi
+
+    # Активация сценариев и статус
+    if [[ "$DRY_RUN" == "true" ]]; then
+        show_ascii_dryrun "CrowdSec" "Будут активированы сценарии ssh-bf и проверен статус" "cscli collections install crowdsecurity/sshd"
+    else
+        cscli collections install crowdsecurity/sshd 2>/dev/null || true
+        systemctl enable --now crowdsec 2>/dev/null || true
+        systemctl restart crowdsec 2>/dev/null || true
+        systemctl restart crowdsec-firewall-bouncer 2>/dev/null || true
+
+        echo ""
+        info "Статус CrowdSec:"
+        cscli decisions list 2>/dev/null | head -15 || true
+        echo ""
+        info "Активные сценарии:"
+        cscli parsers list 2>/dev/null | head -10 || true
+    fi
+
+    save_state "crowdsec_installed" "yes"
     success "Модуль 10 завершён."
 }
 
@@ -1526,6 +1729,30 @@ do_rollback() {
         fi
     fi
 
+    # Монтирования /tmp и /dev/shm: убираем записи из fstab
+    if [[ -f "${backup_path}/fstab.bak" ]]; then
+        if confirm "Убрать безопасные монтирования (восстановить fstab)?" "n"; then
+            cp "${backup_path}/fstab.bak" /etc/fstab
+            rm -f /etc/systemd/system/tmp.mount.d/security.conf 2>/dev/null || true
+            systemctl daemon-reload 2>/dev/null || true
+            success "/etc/fstab восстановлен, drop-in /tmp удалён."
+            warn "Применится после перезагрузки."
+        fi
+    fi
+
+    # CrowdSec: удаление пакетов
+    if [[ -f "${backup_path}/state.txt" ]]; then
+        local cs_installed
+        cs_installed=$(grep "^crowdsec_installed=" "${backup_path}/state.txt" 2>/dev/null | tail -1 | cut -d= -f2-)
+        if [[ "$cs_installed" == "yes" ]]; then
+            if confirm "Удалить CrowdSec (пакеты crowdsec и bouncer)?" "n"; then
+                systemctl stop crowdsec 2>/dev/null || true
+                apt-get remove -y -qq crowdsec crowdsec-firewall-bouncer-nftables crowdsec-firewall-bouncer-iptables 2>/dev/null || true
+                success "CrowdSec удалён."
+            fi
+        fi
+    fi
+
     echo ""
     success "Откат завершён."
     warn "Проверьте изменения и убедитесь что SSH работает."
@@ -1560,7 +1787,9 @@ show_report() {
         "ssh_keys_configured|Настроена авторизация по SSH-ключам" \
         "auto_updates|Включены автоматические обновления" \
         "ssh_audit|Аудит уязвимостей SSH выполнен" \
-        "root_locked|Пароль root заблокирован"; do
+        "root_locked|Пароль root заблокирован" \
+        "mount_hardening|Настроены безопасные монтирования /tmp и /dev/shm" \
+        "crowdsec_installed|Установлен CrowdSec"; do
         key="${line%%|*}"
         desc="${line#*|}"
         [[ "${state[$key]:-}" == "yes" ]] && echo -e "  ${GREEN}[+]${NC} ${desc}"
@@ -1605,6 +1834,8 @@ show_menu() {
     echo -e "  ${CYAN}[6]${NC}   Автоматические обновления безопасности"
     echo -e "  ${CYAN}[7]${NC}   Аудит уязвимостей OpenSSH"
     echo -e "  ${CYAN}[8]${NC}   Блокировка пароля root"
+    echo -e "  ${CYAN}[9]${NC}   Безопасные монтирования (/tmp, /dev/shm)"
+    echo -e "  ${CYAN}[10]${NC}  CrowdSec — коллективная защита"
     echo ""
     echo -e "  ${CYAN}[D]${NC}   Переключить режим (демо/реальный)"
     echo -e "  ${CYAN}[R]${NC}   Откат изменений"
@@ -1695,6 +1926,8 @@ main() {
             6)  module_auto_updates || true ;;
             7)  module_ssh_audit || true ;;
             8)  module_lock_root || true ;;
+            9)  module_mount_hardening || true ;;
+            10) module_crowdsec || true ;;
             d|D)
                 if [[ "$DRY_RUN" == "true" ]]; then
                     DRY_RUN=false
@@ -1722,6 +1955,8 @@ main() {
                 module_auto_updates || true
                 module_ssh_audit || true
                 module_lock_root || true
+                module_mount_hardening || true
+                module_crowdsec || true
                 show_report
                 break
                 ;;
