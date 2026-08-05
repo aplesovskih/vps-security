@@ -14,7 +14,7 @@ fi
 # --------------------------------------
 # Константы
 # --------------------------------------
-readonly SCRIPT_VERSION="2.1.0"
+readonly SCRIPT_VERSION="2.1.1"
 # При curl | bash $0 = "bash" — для подсказок используем реальное имя скрипта
 SCRIPT_NAME="$(basename "$0")"
 case "$SCRIPT_NAME" in
@@ -1473,7 +1473,7 @@ LoginGraceTime 30
 # МОДУЛЬ 8: Блокировка root
 # ======================================================================
 module_lock_root() {
-    header "МОДУЛЬ 10: Блокировка пароля root"
+    header "МОДУЛЬ 8: Блокировка пароля root"
 
     echo ""
     show_ascii_warning "Этот модуль блокирует пароль root. Вы СМОЖЕТЕ стать root ТОЛЬКО через: sudo su - или sudo -i"
@@ -1511,7 +1511,7 @@ module_lock_root() {
     if ! dry_run_or_exec "Блокировка root" \
         "Пароль root будет заблокирован" \
         "passwd -l root"; then
-        handle_error "Модуль 10" "Не удалось заблокировать пароль root" module_lock_root "root_locked" || true
+        handle_error "Модуль 8" "Не удалось заблокировать пароль root" module_lock_root "root_locked" || true
         return
     fi
     success "Пароль root заблокирован."
@@ -1549,90 +1549,10 @@ module_lock_root() {
 }
 
 # ======================================================================
-# МОДУЛЬ 9: Безопасные монтирования /tmp и /dev/shm
-# ======================================================================
-module_mount_hardening() {
-    header "МОДУЛЬ 9: Безопасные монтирования (/tmp, /dev/shm)"
-
-    if ! confirm "Настроить безопасные монтирования /tmp и /dev/shm?"; then
-        info "Пропуск безопасных монтирований."
-        save_state "mount_hardening" "no"
-        return 0
-    fi
-
-    show_ascii_warning "Будут добавлены опции nodev,nosuid,noexec (запрет запуска файлов из /tmp)."
-    warn "Некоторые приложения, выполняющие файлы из /tmp, могут перестать работать!"
-
-    # Текущее состояние
-    info "Текущие опции монтирования:"
-    if command -v findmnt &>/dev/null; then
-        findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS /tmp /dev/shm 2>/dev/null | column -t 2>/dev/null || true
-    else
-        echo "  (findmnt недоступен)"
-    fi
-    echo ""
-
-    backup_file "/etc/fstab"
-
-    # --- /dev/shm ---
-    local shm_entry="tmpfs /dev/shm tmpfs defaults,nodev,nosuid,noexec,nofail,mode=1777 0 0"
-    info "Настройка /dev/shm..."
-    if grep -qE "^tmpfs[[:space:]]+/dev/shm" /etc/fstab 2>/dev/null; then
-        info "/dev/shm уже настроен в /etc/fstab."
-    else
-        if [[ "$DRY_RUN" == "true" ]]; then
-            show_ascii_dryrun "Монтирования" "Запись для /dev/shm будет добавлена в /etc/fstab" "echo '${shm_entry}' >> /etc/fstab"
-        else
-            echo "$shm_entry" >> /etc/fstab
-            success "/dev/shm: добавлена запись в fstab с nodev,nosuid,noexec (nofail)."
-            warn "Применится после перезагрузки (немедленный remount может прервать активные приложения)."
-        fi
-    fi
-
-    # --- /tmp ---
-    info "Настройка /tmp..."
-    local tmp_fs
-    tmp_fs=$(findmnt -n -o FSTYPE /tmp 2>/dev/null || echo "")
-
-    if [[ "$tmp_fs" == "tmpfs" ]]; then
-        # /tmp — tmpfs, управляемый systemd (tmp.mount): применяем drop-in
-        info "/tmp на tmpfs (systemd) — применяем drop-in для tmp.mount."
-        if [[ "$DRY_RUN" == "true" ]]; then
-            show_ascii_dryrun "Монтирования" "Будет создан /etc/systemd/system/tmp.mount.d/security.conf" "cat > /etc/systemd/system/tmp.mount.d/security.conf"
-        else
-            mkdir -p /etc/systemd/system/tmp.mount.d
-            cat > /etc/systemd/system/tmp.mount.d/security.conf <<'CONF'
-[Mount]
-Options=mode=1777,nodev,nosuid,noexec
-CONF
-            systemctl daemon-reload 2>/dev/null || true
-            success "/tmp: systemd drop-in применён (nodev,nosuid,noexec)."
-            warn "Применится после перезагрузки."
-        fi
-    elif grep -qE "[[:space:]]/tmp[[:space:]]" /etc/fstab 2>/dev/null; then
-        # /tmp — раздел на диске с записью в fstab: добавляем опции к существующей строке
-        warn "/tmp — раздел на диске. Добавляем опции к строке fstab (без дублирования)."
-        if [[ "$DRY_RUN" == "true" ]]; then
-            show_ascii_dryrun "Монтирования" "Опции nodev,nosuid,noexec будут добавлены к строке /tmp в fstab" "awk-обработка строки /tmp в /etc/fstab"
-        else
-            awk 'BEGIN{OFS="\t"} $2=="/tmp" && $4 !~ /noexec/ { $4=$4",nodev,nosuid,noexec" } {print}' /etc/fstab > /tmp/fstab.new && mv /tmp/fstab.new /etc/fstab
-            success "/tmp: опции добавлены к строке fstab (nodev,nosuid,noexec)."
-            warn "Применится после перезагрузки."
-        fi
-    else
-        warn "/tmp не найден в fstab и не является tmpfs — пропуск."
-    fi
-
-    save_state "mount_hardening" "yes"
-    success "Модуль 9 завершён."
-    warn "Перезагрузите сервер, чтобы применить опции монтирования."
-}
-
-# ======================================================================
-# МОДУЛЬ 10: CrowdSec — коллективная защита
+# МОДУЛЬ 9: CrowdSec — коллективная защита
 # ======================================================================
 module_crowdsec() {
-    header "МОДУЛЬ 10: CrowdSec (коллективная защита от атак)"
+    header "МОДУЛЬ 9: CrowdSec (коллективная защита от атак)"
 
     if ! confirm "Установить CrowdSec (совместная защита от брутфорса и атак)?"; then
         info "Пропуск CrowdSec."
@@ -1658,13 +1578,13 @@ module_crowdsec() {
         if ! dry_run_or_exec "CrowdSec" \
             "CrowdSec будет установлен (официальный репозиторий)" \
             "curl -s https://install.crowdsec.net | sh"; then
-            handle_error "Модуль 10" "Не удалось добавить репозиторий CrowdSec" module_crowdsec "crowdsec_installed" || true
+            handle_error "Модуль 9" "Не удалось добавить репозиторий CrowdSec" module_crowdsec "crowdsec_installed" || true
             return
         fi
         if ! dry_run_or_exec "CrowdSec" \
             "Пакеты crowdsec и ${bouncer_pkg} будут установлены" \
             "apt-get update -qq && apt-get install -y -qq crowdsec ${bouncer_pkg}"; then
-            handle_error "Модуль 10" "Не удалось установить CrowdSec" module_crowdsec "crowdsec_installed" || true
+            handle_error "Модуль 9" "Не удалось установить CrowdSec" module_crowdsec "crowdsec_installed" || true
             return
         fi
         success "CrowdSec установлен."
@@ -1688,7 +1608,7 @@ module_crowdsec() {
     fi
 
     save_state "crowdsec_installed" "yes"
-    success "Модуль 10 завершён."
+    success "Модуль 9 завершён."
 }
 
 # ======================================================================
@@ -1767,17 +1687,6 @@ do_rollback() {
         fi
     fi
 
-    # Монтирования /tmp и /dev/shm: убираем записи из fstab
-    if [[ -f "${backup_path}/fstab.bak" ]]; then
-        if confirm "Убрать безопасные монтирования (восстановить fstab)?" "n"; then
-            cp "${backup_path}/fstab.bak" /etc/fstab
-            rm -f /etc/systemd/system/tmp.mount.d/security.conf 2>/dev/null || true
-            systemctl daemon-reload 2>/dev/null || true
-            success "/etc/fstab восстановлен, drop-in /tmp удалён."
-            warn "Применится после перезагрузки."
-        fi
-    fi
-
     # CrowdSec: удаление пакетов
     if [[ -f "${backup_path}/state.txt" ]]; then
         local cs_installed
@@ -1826,7 +1735,6 @@ show_report() {
         "auto_updates|Включены автоматические обновления" \
         "ssh_audit|Аудит уязвимостей SSH выполнен" \
         "root_locked|Пароль root заблокирован" \
-        "mount_hardening|Настроены безопасные монтирования /tmp и /dev/shm" \
         "crowdsec_installed|Установлен CrowdSec"; do
         key="${line%%|*}"
         desc="${line#*|}"
@@ -1872,8 +1780,7 @@ show_menu() {
     echo -e "  ${CYAN}[6]${NC}   Автоматические обновления безопасности"
     echo -e "  ${CYAN}[7]${NC}   Аудит уязвимостей OpenSSH"
     echo -e "  ${CYAN}[8]${NC}   Блокировка пароля root"
-    echo -e "  ${CYAN}[9]${NC}   Безопасные монтирования (/tmp, /dev/shm)"
-    echo -e "  ${CYAN}[10]${NC}  CrowdSec — коллективная защита"
+    echo -e "  ${CYAN}[9]${NC}   CrowdSec — коллективная защита"
     echo ""
     echo -e "  ${CYAN}[D]${NC}   Переключить режим (демо/реальный)"
     echo -e "  ${CYAN}[R]${NC}   Откат изменений"
@@ -1964,8 +1871,7 @@ main() {
             6)  module_auto_updates || true ;;
             7)  module_ssh_audit || true ;;
             8)  module_lock_root || true ;;
-            9)  module_mount_hardening || true ;;
-            10) module_crowdsec || true ;;
+            9)  module_crowdsec || true ;;
             d|D)
                 if [[ "$DRY_RUN" == "true" ]]; then
                     DRY_RUN=false
@@ -1993,7 +1899,6 @@ main() {
                 module_auto_updates || true
                 module_ssh_audit || true
                 module_lock_root || true
-                module_mount_hardening || true
                 module_crowdsec || true
                 show_report
                 break
