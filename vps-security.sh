@@ -14,7 +14,7 @@ fi
 # --------------------------------------
 # Константы
 # --------------------------------------
-readonly SCRIPT_VERSION="2.1.1"
+readonly SCRIPT_VERSION="2.2.0"
 # При curl | bash $0 = "bash" — для подсказок используем реальное имя скрипта
 SCRIPT_NAME="$(basename "$0")"
 case "$SCRIPT_NAME" in
@@ -815,6 +815,7 @@ JAIL
 
     # Nginx jail
     if confirm "Включить jail для Nginx/Apache (защита от HTTP-флуда)?" "n"; then
+        save_state "fail2ban_nginx" "yes"
         if [[ "$DRY_RUN" != "true" ]]; then
             cat >> /etc/fail2ban/jail.local <<JAIL
 
@@ -1014,12 +1015,14 @@ module_ssh_keys() {
             if [[ "$DRY_RUN" == "true" ]]; then
                 show_ascii_dryrun "SSH-ключи" "Публичный ключ будет добавлен в /root/.ssh/authorized_keys" "echo '$pubkey' >> /root/.ssh/authorized_keys"
             else
+                backup_file "/root/.ssh/authorized_keys"
                 mkdir -p /root/.ssh && chmod 700 /root/.ssh
                 touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
                 if grep -qF "$pubkey" /root/.ssh/authorized_keys; then
                     warn "Ключ уже существует в authorized_keys."
                 else
                     echo "$pubkey" >> /root/.ssh/authorized_keys
+                    save_state "ssh_pubkey" "$pubkey"
                     success "Публичный ключ добавлен в /root/.ssh/authorized_keys"
                 fi
             fi
@@ -1145,6 +1148,7 @@ module_ssh_keys() {
 
         if [[ -n "$allow_users" ]] && [[ "$valid" == "true" ]]; then
             set_sshd_option "AllowUsers" "$allow_users"
+            save_state "ssh_allow_users" "$allow_users"
             success "AllowUsers: ${allow_users}"
             warn "Вход с других IP теперь будет отклонён! Проверьте доступ в НОВОМ терминале, не закрывая текущий."
         else
@@ -1165,6 +1169,7 @@ module_ssh_keys() {
 ======================================================================
 BANNER
             set_sshd_option "Banner" "/etc/ssh/banner.txt"
+            save_state "banner_created" "yes"
             success "Баннер создан и включён."
         fi
     fi
@@ -1221,6 +1226,8 @@ module_auto_updates() {
     fi
 
     if [[ "$DRY_RUN" != "true" ]]; then
+        backup_file "/etc/apt/apt.conf.d/50unattended-upgrades"
+        backup_file "/etc/apt/apt.conf.d/20auto-upgrades"
         cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'UPGRADES'
 Unattended-Upgrade::Allowed-Origins {
     "${distro_id}:${distro_codename}-security";
@@ -1614,6 +1621,418 @@ module_crowdsec() {
 # ======================================================================
 # ОТКАТ
 # ======================================================================
+# Читает значение state-ключа из бэкапа (пустая строка, если нет).
+# Всегда возвращает 0 — при отсутствии ключа или файла это не ошибка,
+# а «не выполнялось», чтобы не ронять скрипт под set -euo pipefail.
+state_get() {
+    local backup_path="$1" key="$2"
+    [[ -f "${backup_path}/state.txt" ]] || { echo ""; return 0; }
+    grep "^${key}=" "${backup_path}/state.txt" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+# ======================================================================
+# ОТКАТ: точечные действия (по пунктам и подпунктам)
+# Каждый подпункт проверяет state-файл: если действие не выполнялось —
+# сообщает «пропущено» и ничего не делает.
+# ======================================================================
+rollback_item() {
+    local action="$1" backup_path="$2" auto="${3:-}"
+    local username user_created
+
+    case "$action" in
+        # ── Раздел 1: Пользователь ──────────────────────────────────
+        user_delete)
+            user_created=$(state_get "$backup_path" user_created)
+            username=$(state_get "$backup_path" username)
+            if [[ "$user_created" != "yes" ]] || [[ -z "$username" ]]; then
+                info "Пропуск: пользователь не создавался скриптом."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Удалить пользователя '${username}' (userdel -r)?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: пользователь" "Удаление пользователя '${username}'" "userdel -r '${username}'"; then
+                success "Пользователь '${username}' удалён."
+            fi
+            ;;
+        user_ssh_keys)
+            username=$(state_get "$backup_path" username)
+            user_created=$(state_get "$backup_path" user_created)
+            if [[ "$user_created" != "yes" ]] || [[ -z "$username" ]]; then
+                info "Пропуск: пользователь не создавался скриптом."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Удалить SSH-ключи пользователя '${username}'?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: пользователь" "Удаление SSH-ключей пользователя" "rm -rf /home/${username}/.ssh"; then
+                success "SSH-ключи '${username}' удалены."
+            fi
+            ;;
+        user_shell_configs)
+            username=$(state_get "$backup_path" username)
+            user_created=$(state_get "$backup_path" user_created)
+            if [[ "$user_created" != "yes" ]] || [[ -z "$username" ]]; then
+                info "Пропуск: пользователь не создавался скриптом."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Удалить скопированные конфиги оболочки (.bashrc и др.) у '${username}'?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: пользователь" "Удаление конфигов оболочки" "rm -f /home/${username}/.bashrc /home/${username}/.profile /home/${username}/.bash_profile"; then
+                success "Конфиги оболочки '${username}' удалены."
+            fi
+            ;;
+
+        # ── Раздел 2: UFW ───────────────────────────────────────────
+        firewall_restore)
+            if [[ ! -f "${backup_path}/user.rules.bak" ]] && [[ ! -f "${backup_path}/ufw.conf.bak" ]]; then
+                info "Пропуск: бэкапов правил UFW нет."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Восстановить правила UFW из бэкапа?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: UFW" "Восстановление правил UFW из бэкапа" "cp -a '${backup_path}/ufw.conf.bak' /etc/ufw/ufw.conf 2>/dev/null || true; cp -a '${backup_path}/user.rules.bak' /etc/ufw/user.rules 2>/dev/null || true; cp -a '${backup_path}/user6.rules.bak' /etc/ufw/user6.rules 2>/dev/null || true; ufw reload"; then
+                success "Правила UFW восстановлены."
+            fi
+            ;;
+        firewall_custom_rules)
+            if [[ "$auto" != "auto" ]] && ! confirm "Убрать правила HTTP/HTTPS и кастомные правила UFW?" "n"; then return 0; fi
+            if [[ "$DRY_RUN" == "true" ]]; then
+                show_ascii_dryrun "Откат: UFW" "Удаление правил 80/tcp, 443/tcp и правил с комментарием Custom" "ufw delete allow 80/tcp; ufw delete allow 443/tcp; удаление Custom-правил"
+                return 0
+            fi
+            local num=""
+            ufw delete allow 80/tcp 2>/dev/null || true
+            ufw delete allow 443/tcp 2>/dev/null || true
+            while read -r line; do
+                num=$(echo "$line" | awk -F'[][]' '{print $2}')
+                if [[ -n "$num" ]]; then
+                    ufw --force delete "$num" 2>/dev/null || true
+                fi
+            done < <(ufw status numbered 2>/dev/null | grep Custom | tac)
+            success "Кастомные правила UFW удалены."
+            ;;
+        firewall_reset)
+            if [[ "$auto" != "auto" ]] && ! confirm "Сбросить UFW до значений по умолчанию (deny incoming)?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: UFW" "Сброс UFW к значениям по умолчанию" "ufw --force reset && ufw default deny incoming && ufw default allow outgoing"; then
+                success "UFW сброшен к значениям по умолчанию."
+            fi
+            ;;
+
+        # ── Раздел 3: Fail2ban ──────────────────────────────────────
+        fail2ban_restore)
+            if [[ ! -f "${backup_path}/jail.local.bak" ]]; then
+                info "Пропуск: бэкапа jail.local нет."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Восстановить jail.local из бэкапа?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: Fail2ban" "Восстановление jail.local и перезапуск" "cp -a '${backup_path}/jail.local.bak' /etc/fail2ban/jail.local && systemctl restart fail2ban"; then
+                success "Конфигурация fail2ban восстановлена."
+            fi
+            ;;
+        fail2ban_nginx_jail)
+            if [[ "$(state_get "$backup_path" fail2ban_nginx)" != "yes" ]]; then
+                info "Пропуск: nginx-jail не включался."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Убрать nginx-jail из jail.local?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: Fail2ban" "Удаление секции [nginx-http-auth] из jail.local" "sed -i '/^\\[nginx-http-auth\\]/,/^$/d' /etc/fail2ban/jail.local && systemctl restart fail2ban"; then
+                success "nginx-jail убран."
+            fi
+            ;;
+        fail2ban_purge)
+            if [[ "$(state_get "$backup_path" fail2ban_configured)" != "yes" ]]; then
+                info "Пропуск: fail2ban не настраивался скриптом."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Полностью удалить пакет fail2ban?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: Fail2ban" "Удаление пакета fail2ban" "systemctl stop fail2ban 2>/dev/null; apt-get remove -y -qq fail2ban"; then
+                success "Fail2ban удалён."
+            fi
+            ;;
+
+        # ── Раздел 4: SSH доступ ────────────────────────────────────
+        ssh_port_reset)
+            local current_port new_port
+            new_port=$(state_get "$backup_path" new_ssh_port)
+            current_port=$(grep -E "^[# ]*Port\s" /etc/ssh/sshd_config 2>/dev/null | grep -v "^[[:space:]]*#" | head -1 | awk '{print $2}') || true
+            if [[ -z "$new_port" ]] || [[ "$new_port" == "22" ]] || [[ "$current_port" == "22" ]]; then
+                info "Пропуск: порт SSH не менялся или уже 22."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Вернуть порт SSH на 22 (сейчас ${current_port})?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: SSH порт" "Возврат порта SSH на 22" "sed -i '/^\\s*Port\\s/ s/^/#/' /etc/ssh/sshd_config && echo 'Port 22' >> /etc/ssh/sshd_config && sshd -t && systemctl restart sshd"; then
+                success "Порт SSH возвращён на 22."
+            fi
+            ;;
+        ssh_keys_remove)
+            local pubkey
+            pubkey=$(state_get "$backup_path" ssh_pubkey)
+            if [[ -n "$pubkey" ]] && [[ -f /root/.ssh/authorized_keys ]]; then
+                if [[ "$auto" != "auto" ]] && ! confirm "Удалить добавленный SSH-ключ из /root/.ssh/authorized_keys?" "n"; then return 0; fi
+                if dry_run_or_exec "Откат: SSH-ключи" "Удаление ключа из authorized_keys" "grep -vF '${pubkey}' /root/.ssh/authorized_keys > /tmp/ak.$$ && mv /tmp/ak.$$ /root/.ssh/authorized_keys"; then
+                    success "SSH-ключ удалён из authorized_keys."
+                fi
+                if [[ "$auto" != "auto" ]] && ! confirm "Восстановить authorized_keys из бэкапа?" "n"; then return 0; fi
+                if dry_run_or_exec "Откат: SSH-ключи" "Восстановление authorized_keys из бэкапа" "cp -a '${backup_path}/authorized_keys.bak' /root/.ssh/authorized_keys"; then
+                    success "authorized_keys восстановлен."
+                fi
+                info "Пропуск: ключей, добавленных скриптом, не найдено."
+            fi
+            ;;
+        ssh_allow_users_remove)
+            if [[ -z "$(state_get "$backup_path" ssh_allow_users)" ]]; then
+                info "Пропуск: AllowUsers не устанавливался."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Снять ограничение AllowUsers (разрешить вход всем)?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: SSH" "Удаление AllowUsers из sshd_config" "sed -i '/^AllowUsers\\s/d' /etc/ssh/sshd_config && sshd -t && systemctl restart sshd"; then
+                success "AllowUsers снят."
+            fi
+            ;;
+        ssh_banner_remove)
+            if [[ "$(state_get "$backup_path" banner_created)" != "yes" ]]; then
+                info "Пропуск: баннер не создавался."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Удалить баннер предупреждения (/etc/ssh/banner.txt)?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: SSH" "Удаление баннера и опции Banner" "rm -f /etc/ssh/banner.txt; sed -i '/^Banner\\s/d' /etc/ssh/sshd_config && sshd -t && systemctl restart sshd"; then
+                success "Баннер удалён."
+            fi
+            ;;
+        ssh_hardening_remove)
+            if [[ "$(state_get "$backup_path" ssh_keys_configured)" != "yes" ]]; then
+                info "Пропуск: SSH-харденинг не применялся."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Убрать hardening-опции (LogLevel, KbdInteractive, MaxSessions, ClientAlive)?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: SSH" "Удаление hardening-опций из sshd_config" "sed -i -E '/^\\s*(LogLevel|KbdInteractiveAuthentication|MaxSessions|ClientAliveInterval|ClientAliveCountMax)\\s/d' /etc/ssh/sshd_config && sshd -t && systemctl restart sshd"; then
+                success "Hardening-опции убраны."
+            fi
+            ;;
+        sshd_config_restore)
+            if [[ ! -f "${backup_path}/sshd_config.bak" ]]; then
+                info "Пропуск: бэкапа sshd_config нет."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Полностью восстановить sshd_config из бэкапа?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: SSH" "Полное восстановление sshd_config из бэкапа" "cp -a '${backup_path}/sshd_config.bak' /etc/ssh/sshd_config && sshd -t && systemctl restart sshd"; then
+                success "sshd_config восстановлен."
+            fi
+            ;;
+
+        # ── Раздел 5: Автообновления ────────────────────────────────
+        updates_disable)
+            if [[ "$(state_get "$backup_path" auto_updates)" != "yes" ]]; then
+                info "Пропуск: автообновления не включались."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Отключить автоматические обновления?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: автообновления" "Отключение unattended-upgrades" "systemctl disable --now unattended-upgrades 2>/dev/null; rm -f /etc/apt/apt.conf.d/20auto-upgrades /etc/apt/apt.conf.d/50unattended-upgrades"; then
+                success "Автообновления отключены."
+            fi
+            ;;
+        updates_purge)
+            if [[ "$(state_get "$backup_path" auto_updates)" != "yes" ]]; then
+                info "Пропуск: автообновления не включались."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Удалить пакет unattended-upgrades?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: автообновления" "Удаление пакета unattended-upgrades" "apt-get remove -y -qq unattended-upgrades apt-listchanges"; then
+                success "Пакет unattended-upgrades удалён."
+            fi
+            ;;
+
+        # ── Раздел 6: Блокировка root ───────────────────────────────
+        root_unlock)
+            if [[ "$(state_get "$backup_path" root_locked)" != "yes" ]]; then
+                info "Пропуск: root не блокировался."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Разблокировать пароль root (passwd -u)?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: root" "Разблокировка пароля root" "passwd -u root"; then
+                success "Пароль root разблокирован."
+            fi
+            ;;
+        root_shell_restore)
+            if [[ "$(state_get "$backup_path" root_locked)" != "yes" ]]; then
+                info "Пропуск: shell root не менялся."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Вернуть root shell /bin/bash?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: root" "Возврат shell /bin/bash для root" "chsh -s /bin/bash root"; then
+                success "Root shell возвращён на /bin/bash."
+            fi
+            ;;
+
+        # ── Раздел 7: CrowdSec ───────────────────────────────────────
+        crowdsec_purge)
+            if [[ "$(state_get "$backup_path" crowdsec_installed)" != "yes" ]]; then
+                info "Пропуск: CrowdSec не устанавливался."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Удалить CrowdSec (пакеты crowdsec и bouncer)?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: CrowdSec" "Удаление пакетов crowdsec и bouncer" "systemctl stop crowdsec 2>/dev/null; apt-get remove -y -qq crowdsec crowdsec-firewall-bouncer-nftables crowdsec-firewall-bouncer-iptables"; then
+                success "CrowdSec удалён."
+            fi
+            ;;
+        crowdsec_config_clean)
+            if [[ "$(state_get "$backup_path" crowdsec_installed)" != "yes" ]]; then
+                info "Пропуск: CrowdSec не устанавливался."
+                return 0
+            fi
+            if [[ "$auto" != "auto" ]] && ! confirm "Очистить конфиги CrowdSec (/etc/crowdsec)?" "n"; then return 0; fi
+            if dry_run_or_exec "Откат: CrowdSec" "Удаление конфигов /etc/crowdsec" "rm -rf /etc/crowdsec"; then
+                success "Конфиги CrowdSec удалены."
+            fi
+            ;;
+        *)
+            error "Неизвестное действие отката: ${action}"
+            return 1
+            ;;
+    esac
+}
+
+# ======================================================================
+# ОТКАТ: подменю разделов (пункт → подпункты)
+# ======================================================================
+rollback_section() {
+    local section="$1" backup_path="$2"
+    local sub
+
+    while true; do
+        echo ""
+        header "ОТКАТ → Раздел ${section}"
+        case "$section" in
+            1)
+                echo -e "  ${CYAN}[1.1]${NC}   Удалить пользователя"
+                echo -e "  ${CYAN}[1.2]${NC}   Удалить SSH-ключи пользователя"
+                echo -e "  ${CYAN}[1.3]${NC}   Удалить конфиги оболочки (.bashrc и др.)"
+                ;;
+            2)
+                echo -e "  ${CYAN}[2.1]${NC}   Восстановить правила UFW из бэкапа"
+                echo -e "  ${CYAN}[2.2]${NC}   Убрать HTTP/HTTPS и кастомные правила"
+                echo -e "  ${CYAN}[2.3]${NC}   Сбросить UFW до значений по умолчанию"
+                ;;
+            3)
+                echo -e "  ${CYAN}[3.1]${NC}   Восстановить jail.local из бэкапа"
+                echo -e "  ${CYAN}[3.2]${NC}   Убрать nginx-jail"
+                echo -e "  ${CYAN}[3.3]${NC}   Полностью удалить пакет fail2ban"
+                ;;
+            4)
+                echo -e "  ${CYAN}[4.1]${NC}   Вернуть порт SSH 22"
+                echo -e "  ${CYAN}[4.2]${NC}   Удалить SSH-ключи из authorized_keys (root)"
+                echo -e "  ${CYAN}[4.3]${NC}   Снять AllowUsers (ограничение по IP)"
+                echo -e "  ${CYAN}[4.4]${NC}   Удалить баннер предупреждения"
+                echo -e "  ${CYAN}[4.5]${NC}   Убрать hardening-опции (LogLevel и др.)"
+                echo -e "  ${CYAN}[4.6]${NC}   Полностью восстановить sshd_config из бэкапа"
+                ;;
+            5)
+                echo -e "  ${CYAN}[5.1]${NC}   Отключить автоматические обновления"
+                echo -e "  ${CYAN}[5.2]${NC}   Удалить пакет unattended-upgrades"
+                ;;
+            6)
+                echo -e "  ${CYAN}[6.1]${NC}   Разблокировать пароль root"
+                echo -e "  ${CYAN}[6.2]${NC}   Вернуть root shell /bin/bash"
+                ;;
+            7)
+                echo -e "  ${CYAN}[7.1]${NC}   Удалить CrowdSec (пакеты)"
+                echo -e "  ${CYAN}[7.2]${NC}   Очистить конфиги CrowdSec (/etc/crowdsec)"
+                ;;
+        esac
+        echo -e "  ${CYAN}[0]${NC}    Назад к разделам"
+        echo ""
+        read -rp "$(echo -e "${BOLD}Ваш выбор: ${NC}")" sub || { echo ""; return 0; }
+
+        case "${section}.${sub}" in
+            1.1) rollback_item user_delete "$backup_path" ;;
+            1.2) rollback_item user_ssh_keys "$backup_path" ;;
+            1.3) rollback_item user_shell_configs "$backup_path" ;;
+            2.1) rollback_item firewall_restore "$backup_path" ;;
+            2.2) rollback_item firewall_custom_rules "$backup_path" ;;
+            2.3) rollback_item firewall_reset "$backup_path" ;;
+            3.1) rollback_item fail2ban_restore "$backup_path" ;;
+            3.2) rollback_item fail2ban_nginx_jail "$backup_path" ;;
+            3.3) rollback_item fail2ban_purge "$backup_path" ;;
+            4.1) rollback_item ssh_port_reset "$backup_path" ;;
+            4.2) rollback_item ssh_keys_remove "$backup_path" ;;
+            4.3) rollback_item ssh_allow_users_remove "$backup_path" ;;
+            4.4) rollback_item ssh_banner_remove "$backup_path" ;;
+            4.5) rollback_item ssh_hardening_remove "$backup_path" ;;
+            4.6) rollback_item sshd_config_restore "$backup_path" ;;
+            5.1) rollback_item updates_disable "$backup_path" ;;
+            5.2) rollback_item updates_purge "$backup_path" ;;
+            6.1) rollback_item root_unlock "$backup_path" ;;
+            6.2) rollback_item root_shell_restore "$backup_path" ;;
+            7.1) rollback_item crowdsec_purge "$backup_path" ;;
+            7.2) rollback_item crowdsec_config_clean "$backup_path" ;;
+            *.0) return 0 ;;
+            *) error "Неверный выбор. Попробуйте снова." ;;
+        esac
+    done
+}
+
+# ======================================================================
+# ОТКАТ: главное меню + полный откат
+# ======================================================================
+rollback_menu() {
+    local backup_path="$1"
+    local section
+
+    while true; do
+        echo ""
+        header "ОТКАТ: выберите, что откатить"
+        echo ""
+        echo -e "  ${CYAN}[1]${NC}   Пользователь и ключи"
+        echo -e "  ${CYAN}[2]${NC}   Файрвол UFW"
+        echo -e "  ${CYAN}[3]${NC}   Fail2ban"
+        echo -e "  ${CYAN}[4]${NC}   SSH доступ (порт, ключи, харденинг)"
+        echo -e "  ${CYAN}[5]${NC}   Автообновления"
+        echo -e "  ${CYAN}[6]${NC}   Блокировка root"
+        echo -e "  ${CYAN}[7]${NC}   CrowdSec"
+        echo -e "  ${BOLD}${RED}[A]${NC}   ПОЛНЫЙ откат (всё сразу)"
+        echo -e "  ${CYAN}[0]${NC}    Назад в главное меню"
+        echo ""
+        read -rp "$(echo -e "${BOLD}Ваш выбор: ${NC}")" section || { echo ""; return 0; }
+
+        case "${section,,}" in
+            1|2|3|4|5|6|7) rollback_section "$section" "$backup_path" ;;
+            a) rollback_all "$backup_path" ;;
+            0|q) return 0 ;;
+            *) error "Неверный выбор. Попробуйте снова." ;;
+        esac
+    done
+}
+
+# Полный откат: последовательно вызывает все подпункты без переспрашивания
+rollback_all() {
+    local backup_path="$1"
+    header "ОТКАТ: ПОЛНЫЙ откат всех изменений"
+    if ! confirm "Выполнить полный откат всех изменений?"; then
+        return 0
+    fi
+
+    rollback_item user_delete "$backup_path" auto
+    rollback_item user_ssh_keys "$backup_path" auto
+    rollback_item user_shell_configs "$backup_path" auto
+    rollback_item firewall_restore "$backup_path" auto
+    rollback_item firewall_custom_rules "$backup_path" auto
+    rollback_item firewall_reset "$backup_path" auto
+    rollback_item fail2ban_restore "$backup_path" auto
+    rollback_item fail2ban_nginx_jail "$backup_path" auto
+    rollback_item fail2ban_purge "$backup_path" auto
+    rollback_item ssh_port_reset "$backup_path" auto
+    rollback_item ssh_keys_remove "$backup_path" auto
+    rollback_item ssh_allow_users_remove "$backup_path" auto
+    rollback_item ssh_banner_remove "$backup_path" auto
+    rollback_item ssh_hardening_remove "$backup_path" auto
+    rollback_item sshd_config_restore "$backup_path" auto
+    rollback_item updates_disable "$backup_path" auto
+    rollback_item updates_purge "$backup_path" auto
+    rollback_item root_unlock "$backup_path" auto
+    rollback_item root_shell_restore "$backup_path" auto
+    rollback_item crowdsec_purge "$backup_path" auto
+    rollback_item crowdsec_config_clean "$backup_path" auto
+
+    echo ""
+    success "Полный откат завершён."
+    warn "Проверьте изменения и убедитесь что SSH работает."
+}
+
 do_rollback() {
     header "ОТКАТ: Восстановление предыдущего состояния"
 
@@ -1628,81 +2047,7 @@ do_rollback() {
     fi
 
     info "Восстановление из: ${backup_path}"
-
-    if ! confirm "Выполнить откат?"; then
-        return 0
-    fi
-
-    # sshd_config
-    if [[ -f "${backup_path}/sshd_config.bak" ]]; then
-        cp "${backup_path}/sshd_config.bak" /etc/ssh/sshd_config
-        systemctl restart sshd 2>/dev/null || true
-        success "sshd_config восстановлен и SSHD перезапущен."
-    fi
-
-    # UFW
-    for f in ufw.conf user.rules user6.rules; do
-        [[ -f "${backup_path}/${f}.bak" ]] && cp "${backup_path}/${f}.bak" "/etc/ufw/${f}"
-    done
-    if [[ -f "${backup_path}/ufw.conf.bak" ]]; then
-        systemctl restart ufw 2>/dev/null || true
-        success "Правила UFW восстановлены."
-    fi
-
-    # fail2ban
-    if [[ -f "${backup_path}/jail.local.bak" ]]; then
-        cp "${backup_path}/jail.local.bak" /etc/fail2ban/jail.local
-        systemctl restart fail2ban 2>/dev/null || true
-        success "Конфигурация fail2ban восстановлена."
-    fi
-
-    # shadow
-    if [[ -f "${backup_path}/shadow.bak" ]]; then
-        if confirm "Восстановить /etc/shadow (отмена блокировки root)?" "y"; then
-            cp "${backup_path}/shadow.bak" /etc/shadow
-            chown root:shadow /etc/shadow && chmod 640 /etc/shadow
-            success "/etc/shadow восстановлен."
-        fi
-    fi
-
-    # passwd
-    if [[ -f "${backup_path}/passwd.bak" ]]; then
-        if confirm "Восстановить /etc/passwd (возврат shell)?" "y"; then
-            cp "${backup_path}/passwd.bak" /etc/passwd
-            success "/etc/passwd восстановлен."
-        fi
-    fi
-
-    # Пользователь
-    if [[ -f "${backup_path}/state.txt" ]]; then
-        local user_created username
-        user_created=$(grep "^user_created=" "${backup_path}/state.txt" 2>/dev/null | tail -1 | cut -d= -f2-)
-        username=$(grep "^username=" "${backup_path}/state.txt" 2>/dev/null | tail -1 | cut -d= -f2-)
-
-        if [[ "$user_created" == "yes" ]] && [[ -n "$username" ]]; then
-            if confirm "Удалить пользователя '${username}' созданного этим скриптом?" "n"; then
-                userdel -r "$username" 2>/dev/null || true
-                success "Пользователь '${username}' удалён."
-            fi
-        fi
-    fi
-
-    # CrowdSec: удаление пакетов
-    if [[ -f "${backup_path}/state.txt" ]]; then
-        local cs_installed
-        cs_installed=$(grep "^crowdsec_installed=" "${backup_path}/state.txt" 2>/dev/null | tail -1 | cut -d= -f2-)
-        if [[ "$cs_installed" == "yes" ]]; then
-            if confirm "Удалить CrowdSec (пакеты crowdsec и bouncer)?" "n"; then
-                systemctl stop crowdsec 2>/dev/null || true
-                apt-get remove -y -qq crowdsec crowdsec-firewall-bouncer-nftables crowdsec-firewall-bouncer-iptables 2>/dev/null || true
-                success "CrowdSec удалён."
-            fi
-        fi
-    fi
-
-    echo ""
-    success "Откат завершён."
-    warn "Проверьте изменения и убедитесь что SSH работает."
+    rollback_menu "$backup_path"
 }
 
 # ======================================================================
