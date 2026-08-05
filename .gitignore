@@ -1,1 +1,6 @@
 graphify-out/
+
+# Planning files (local only)
+task_plan.md
+findings.md
+progress.md
