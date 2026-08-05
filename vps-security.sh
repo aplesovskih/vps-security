@@ -15,7 +15,12 @@ fi
 # Константы
 # --------------------------------------
 readonly SCRIPT_VERSION="2.0.0"
-readonly SCRIPT_NAME="$(basename "$0")"
+# При curl | bash $0 = "bash" — для подсказок используем реальное имя скрипта
+SCRIPT_NAME="$(basename "$0")"
+case "$SCRIPT_NAME" in
+    bash|sh|dash|-bash|-sh) SCRIPT_NAME="vps-security.sh" ;;
+esac
+readonly SCRIPT_NAME
 readonly ORIGINAL_SSH_PORT=22
 
 # Цвета
@@ -37,11 +42,21 @@ LOG_FILE=""
 BACKUP_DIR=""
 
 init_paths() {
-    LOG_FILE="/var/log/vps-security-$(date +%Y%m%d_%H%M%S).log"
-    BACKUP_DIR="/root/vps-security-backups/$(date +%Y%m%d_%H%M%S)"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        # Демо-режим НЕ пишет в систему: лог и бэкапы — только во временную папку
+        LOG_FILE="/tmp/vps-security-dryrun-$(date +%Y%m%d_%H%M%S).log"
+        BACKUP_DIR="/tmp/vps-security-dryrun-$(date +%Y%m%d_%H%M%S)"
+    else
+        LOG_FILE="/var/log/vps-security-$(date +%Y%m%d_%H%M%S).log"
+        BACKUP_DIR="/root/vps-security-backups/$(date +%Y%m%d_%H%M%S)"
+    fi
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
     mkdir -p "$BACKUP_DIR"
-    log "INFO" "Скрипт запущен. PID=$$ Пользователь=root Версия=${SCRIPT_VERSION}"
+    # В бэкапах лежат копии /etc/shadow — закрываем доступ (только root)
+    if [[ "$DRY_RUN" != "true" ]]; then
+        chmod 700 "$BACKUP_DIR" 2>/dev/null || true
+    fi
+    log "INFO" "Скрипт запущен. PID=$$ Пользователь=root Версия=${SCRIPT_VERSION} Режим=$([[ "$DRY_RUN" == "true" ]] && echo dry-run || echo real)"
 }
 
 # --------------------------------------
@@ -51,6 +66,7 @@ log() {
     local level="$1"; shift
     local timestamp
     timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
+    [[ -n "${LOG_FILE:-}" ]] || return 0
     echo "[${timestamp}] [${level}] $*" >> "${LOG_FILE}" 2>/dev/null || true
 }
 
@@ -163,6 +179,14 @@ dry_run_or_exec() {
         return 0
     fi
 
+    # Защита от инъекций: после подстановки переменных в команде не должно
+    # оставаться $() или обратных кавычек (весь ввод пользователя валидируется)
+    if [[ "$real_cmd" == *'$('* || "$real_cmd" == *'`'* ]]; then
+        error "[${module}] Команда содержит опасную конструкцию. Пропуск."
+        log "ERROR" "[${module}] Опасная команда заблокирована: ${real_cmd}"
+        return 1
+    fi
+
     if ! eval "$real_cmd" 2>>"${LOG_FILE}"; then
         return 1
     fi
@@ -250,14 +274,66 @@ validate_port() {
     return 0
 }
 
-check_package() {
-    local pkg="$1"
-    dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"
+validate_number() {
+    local val="$1" name="$2"
+    if ! [[ "$val" =~ ^[0-9]+$ ]] || (( val < 1 )); then
+        error "${name} должен быть положительным числом (например: 3, 600, 3600)."
+        return 1
+    fi
+    return 0
 }
 
-check_service() {
-    local svc="$1"
-    systemctl is-active --quiet "$svc" 2>/dev/null
+validate_ip_cidr() {
+    local ip="$1" octets
+    [[ -z "$ip" ]] && return 0
+    if [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})(/([0-9]{1,2}))?$ ]]; then
+        octets=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}")
+        for octet in "${octets[@]}"; do
+            if (( octet > 255 )); then
+                error "Неверный IP: октет ${octet} больше 255. Примеры: 127.0.0.1 или 10.0.0.0/8"
+                return 1
+            fi
+        done
+        if [[ -n "${BASH_REMATCH[6]:-}" ]] && (( BASH_REMATCH[6] > 32 )); then
+            error "Неверный префикс CIDR: /${BASH_REMATCH[6]} больше /32. Пример: 10.0.0.0/8"
+            return 1
+        fi
+        return 0
+    fi
+    error "Неверный формат IP/CIDR: ${ip}. Примеры: 127.0.0.1 или 10.0.0.0/8"
+    return 1
+}
+
+# ---- Сравнение версий OpenSSH (9.2p1 -> 9.2.1) ----
+norm_ver() {
+    local v="$1" parts i out=""
+    v="${v//p/.}"
+    IFS='.' read -ra parts <<< "$v"
+    for ((i = 0; i < 3; i++)); do
+        if [[ -n "${parts[$i]:-}" ]] && [[ "${parts[$i]}" =~ ^[0-9]+$ ]]; then
+            out+="${parts[$i]}"
+        else
+            out+="0"
+        fi
+        (( i < 2 )) && out+="."
+    done
+    echo "$out"
+}
+
+ver_ge() { # $1 >= $2
+    local a b
+    a=$(norm_ver "$1"); b=$(norm_ver "$2")
+    [[ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -1)" == "$b" ]]
+}
+
+ver_le() { # $1 <= $2
+    local a b
+    a=$(norm_ver "$1"); b=$(norm_ver "$2")
+    [[ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -1)" == "$a" ]]
+}
+
+ver_lt() { # $1 < $2
+    ! ver_ge "$1" "$2"
 }
 
 # --------------------------------------
@@ -265,6 +341,8 @@ check_service() {
 # --------------------------------------
 backup_file() {
     local file="$1"
+    # Демо-режим НЕ создаёт резервные копии — ничего не пишется на диск
+    [[ "$DRY_RUN" == "true" ]] && return 0
     if [[ -f "$file" ]]; then
         mkdir -p "${BACKUP_DIR}"
         cp -a "$file" "${BACKUP_DIR}/$(basename "$file").bak"
@@ -647,16 +725,28 @@ module_fail2ban() {
     ssh_port=$(load_state "new_ssh_port" "$ORIGINAL_SSH_PORT")
 
     local max_retry bantime findtime ignore_ip
-    read -rp "$(echo -e "${YELLOW}Макс. неудачных попыток перед баном [3]: ${NC}")" max_retry || true
-    max_retry="${max_retry:-3}"
+    while true; do
+        read -rp "$(echo -e "${YELLOW}Макс. неудачных попыток перед баном [3]: ${NC}")" max_retry || true
+        max_retry="${max_retry:-3}"
+        validate_number "$max_retry" "Макс. попыток" && break
+    done
 
-    read -rp "$(echo -e "${YELLOW}Длительность блокировки в секундах [3600]: ${NC}")" bantime || true
-    bantime="${bantime:-3600}"
+    while true; do
+        read -rp "$(echo -e "${YELLOW}Длительность блокировки в секундах [3600]: ${NC}")" bantime || true
+        bantime="${bantime:-3600}"
+        validate_number "$bantime" "Время блокировки" && break
+    done
 
-    read -rp "$(echo -e "${YELLOW}Окно подсчёта попыток в секундах [600]: ${NC}")" findtime || true
-    findtime="${findtime:-600}"
+    while true; do
+        read -rp "$(echo -e "${YELLOW}Окно подсчёта попыток в секундах [600]: ${NC}")" findtime || true
+        findtime="${findtime:-600}"
+        validate_number "$findtime" "Окно попыток" && break
+    done
 
-    read -rp "$(echo -e "${YELLOW}Игнорировать IP (например 127.0.0.1 или пусто): ${NC}")" ignore_ip || true
+    while true; do
+        read -rp "$(echo -e "${YELLOW}Игнорировать IP (например 127.0.0.1 или пусто): ${NC}")" ignore_ip || true
+        validate_ip_cidr "$ignore_ip" && break
+    done
 
     if [[ "$DRY_RUN" == "true" ]]; then
         show_ascii_dryrun "Настройка Fail2ban" \
@@ -750,9 +840,13 @@ module_ssh_port() {
     fi
 
     local new_port
-    new_port=$(ask_port "Введите новый порт SSH: ")
+    if ! new_port=$(ask_port "Введите новый порт SSH: "); then
+        warn "Ввод отменён. Порт SSH не изменён."
+        save_state "new_ssh_port" "$current_port"
+        return 0
+    fi
 
-    if [[ "$new_port" == "$current_port" ]]; then
+    if [[ -z "$new_port" || "$new_port" == "$current_port" ]]; then
         warn "Новый порт совпадает с текущим. Пропуск."
         save_state "new_ssh_port" "$current_port"
         return 0
@@ -799,7 +893,7 @@ module_ssh_port() {
     echo "  2. Подключитесь: ssh -p ${new_port} user@$(hostname -I 2>/dev/null | awk '{print $1}')"
     echo "  3. Если не получится — старый порт ${current_port} ещё работает"
     echo ""
-    show_ascii_warning "При перезапуске SSHD текущий SSH-сеанс будет разорван и связь с сервером потеряется!"
+    show_ascii_warning "Текущая SSH-сессия НЕ прервётся при перезапуске SSHD. После перезапуска вход будет возможен только на новом порту ${new_port}."
     if confirm "Перезапустить SSHD сейчас? (текущая сессия использует порт ${current_port} - НЕ прервётся)" "y"; then
         if [[ "$DRY_RUN" == "true" ]]; then
             show_ascii_dryrun "Смена SSH порта" "SSHD будет перезапущен" "systemctl restart ssh || systemctl restart sshd"
@@ -871,6 +965,12 @@ module_ssh_keys() {
         echo ""
         info "Вставьте ваш ПУБЛИЧНЫЙ КЛЮЧ (полная строка, начинается с ssh-ed25519 или ssh-rsa):"
         read -rp "$(echo -e "${YELLOW}> ${NC}")" pubkey || true
+        pubkey="${pubkey//[$'\r\n']/}"
+
+        if [[ -n "$pubkey" ]] && ! [[ "$pubkey" =~ ^(ssh-ed25519|ssh-rsa|ssh-dss|ecdsa-sha2-|sk-ssh-ed25519|sk-ecdsa-sha2-) ]]; then
+            error "Не похоже на SSH-ключ (ожидается ssh-ed25519/ssh-rsa...). Пропуск."
+            pubkey=""
+        fi
 
         if [[ -n "$pubkey" ]]; then
             if [[ "$DRY_RUN" == "true" ]]; then
@@ -901,13 +1001,20 @@ module_ssh_keys() {
             echo -e "${YELLOW}Вставьте публичный ключ:${NC}"
             local pubkey2
             read -rp "> " pubkey2 || true
+            pubkey2="${pubkey2//[$'\r\n']/}"
+
+            if [[ -n "$pubkey2" ]] && ! [[ "$pubkey2" =~ ^(ssh-ed25519|ssh-rsa|ssh-dss|ecdsa-sha2-|sk-ssh-ed25519|sk-ecdsa-sha2-) ]]; then
+                error "Не похоже на SSH-ключ (ожидается ssh-ed25519/ssh-rsa...). Пропуск."
+                pubkey2=""
+            fi
 
             if [[ -n "$pubkey2" ]]; then
                 if [[ "$DRY_RUN" == "true" ]]; then
                     show_ascii_dryrun "SSH-ключи" "Ключ будет добавлен пользователю ${target_user}" "echo key >> /home/${target_user}/.ssh/authorized_keys"
                 else
                     local home_dir
-                    home_dir=$(eval echo "~${target_user}")
+                    home_dir=$(getent passwd "$target_user" | cut -d: -f6)
+                    [[ -z "$home_dir" ]] && home_dir="/home/${target_user}"
                     mkdir -p "${home_dir}/.ssh" && chmod 700 "${home_dir}/.ssh"
                     touch "${home_dir}/.ssh/authorized_keys" && chmod 600 "${home_dir}/.ssh/authorized_keys"
                     echo "$pubkey2" >> "${home_dir}/.ssh/authorized_keys"
@@ -948,8 +1055,11 @@ module_ssh_keys() {
     fi
 
     local max_tries
-    read -rp "$(echo -e "${YELLOW}Макс. попыток аутентификации [3]: ${NC}")" max_tries || true
-    max_tries="${max_tries:-3}"
+    while true; do
+        read -rp "$(echo -e "${YELLOW}Макс. попыток аутентификации [3]: ${NC}")" max_tries || true
+        max_tries="${max_tries:-3}"
+        validate_number "$max_tries" "Макс. попыток" && break
+    done
     set_sshd_option "MaxAuthTries" "$max_tries"
     success "MaxAuthTries установлен в ${max_tries}."
 
@@ -975,7 +1085,7 @@ module_ssh_keys() {
         fi
     fi
 
-    show_ascii_warning "При перезапуске SSHD текущий SSH-сеанс будет разорван и связь с сервером потеряется!"
+    show_ascii_warning "Текущая SSH-сессия не прервётся при перезапуске SSHD. Новые подключения будут работать по обновлённым правилам."
     if confirm "Перезапустить SSHD для применения изменений?" "y"; then
         if [[ "$DRY_RUN" == "true" ]]; then
             show_ascii_dryrun "SSH-ключи" "SSHD будет перезапущен" "systemctl restart ssh || systemctl restart sshd"
@@ -1065,9 +1175,11 @@ module_ssh_audit() {
     info "Установленная версия SSH: ${ssh_version}"
     log "AUDIT" "Версия SSH: ${ssh_version}"
 
-    local ver_num major_ver
-    ver_num=$(echo "$ssh_version" | grep -oP 'OpenSSH_\K[0-9]+(\.[0-9]+)*' || echo "0")
-    major_ver=$(echo "$ver_num" | cut -d. -f1)
+    local ver_num
+    ver_num=$(echo "$ssh_version" | grep -oP 'OpenSSH_\K[0-9]+(\.[0-9]+)*p?[0-9]*' || echo "0")
+    ver_num="${ver_num:-0}"
+    local ver_unknown=false
+    [[ "$ver_num" == "0" ]] && ver_unknown=true
 
     echo ""
     divider
@@ -1078,30 +1190,33 @@ module_ssh_audit() {
     local issues=0
     local sshd_conf="/etc/ssh/sshd_config"
 
-    # CVE-2023-38408
-    if [[ "$major_ver" -le 9 ]] 2>/dev/null; then
-        warn "  [!] CVE-2023-38408 (удалённое выполнение кода через ssh-agent)"
-        warn "      Затронутые версии: OpenSSH <= 9.3"
-        warn "      Исправление: обновить до OpenSSH >= 9.3p2"
-        ((issues++)) || true
-    fi
+    if [[ "$ver_unknown" == "true" ]]; then
+        warn "  [!] Не удалось определить версию OpenSSH — проверки CVE пропущены."
+        warn "      Проверьте вручную: ssh -V"
+    else
+        # CVE-2023-38408 (уязвимы версии < 9.3p2)
+        if ver_lt "$ver_num" "9.3p2"; then
+            warn "  [!] CVE-2023-38408 (удалённое выполнение кода через ssh-agent)"
+            warn "      Затронутые версии: OpenSSH < 9.3p2"
+            warn "      Исправление: обновить до OpenSSH >= 9.3p2"
+            ((issues++)) || true
+        fi
 
-    # CVE-2023-48795 (Terrapin)
-    local minor_ver
-    minor_ver=$(echo "$ver_num" | cut -d. -f2)
-    if [[ "$major_ver" -lt 9 ]] || { [[ "$major_ver" -eq 9 ]] && [[ "${minor_ver:-0}" -lt 6 ]]; }; then
-        warn "  [!] CVE-2023-48795 (Terrapin — атака на префикс ключевого обмена)"
-        warn "      Затронутые версии: OpenSSH < 9.6p1"
-        warn "      Исправление: обновить до OpenSSH >= 9.6p1"
-        ((issues++)) || true
-    fi
+        # CVE-2023-48795 (Terrapin, < 9.6p1)
+        if ver_lt "$ver_num" "9.6p1"; then
+            warn "  [!] CVE-2023-48795 (Terrapin — атака на префикс ключевого обмена)"
+            warn "      Затронутые версии: OpenSSH < 9.6p1"
+            warn "      Исправление: обновить до OpenSSH >= 9.6p1"
+            ((issues++)) || true
+        fi
 
-    # CVE-2024-6387 (regreSSHion)
-    if [[ "$major_ver" -ge 8 ]] && [[ "$major_ver" -le 9 ]] 2>/dev/null; then
-        warn "  [!] CVE-2024-6387 (regreSSHion — гонка данных)"
-        warn "      Затронутые версии: OpenSSH 8.5p1 - 9.7p1 (glibc)"
-        warn "      Исправление: обновить до OpenSSH >= 9.8p1"
-        ((issues++)) || true
+        # CVE-2024-6387 (regreSSHion, 8.5p1 - 9.7p1 на glibc)
+        if ver_ge "$ver_num" "8.5p1" && ver_le "$ver_num" "9.7p1"; then
+            warn "  [!] CVE-2024-6387 (regreSSHion — гонка данных)"
+            warn "      Затронутые версии: OpenSSH 8.5p1 - 9.7p1 (glibc)"
+            warn "      Исправление: обновить до OpenSSH >= 9.8p1"
+            ((issues++)) || true
+        fi
     fi
 
     # Слабые шифры
@@ -1164,7 +1279,7 @@ module_ssh_audit() {
             if [[ "$DRY_RUN" == "true" ]]; then
                 show_ascii_dryrun "SSH аудит" \
                     "Будут применены рекомендуемые шифры, MAC и KexAlgorithms" \
-                    "sed -i '/Security Hardening/,/End Security Hardening/d' /etc/ssh/sshd_config"
+                    "блок Security Hardening будет вставлен в sshd_config перед Include"
             else
                 backup_file "/etc/ssh/sshd_config"
                 local block="
@@ -1175,8 +1290,24 @@ MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@op
 KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512
 LoginGraceTime 30
 # === End Security Hardening ==="
-                sed -i '/# === Security Hardening (vps-security.sh) ===/,/# === End Security Hardening ===/d' /etc/ssh/sshd_config
-                echo "$block" >> /etc/ssh/sshd_config
+
+                # sshd: first-match-wins — вставляем блок ДО Include, чтобы настройки
+                # не перекрывались файлами из /etc/ssh/sshd_config.d/
+                sed -i '/# === Security Hardening (vps-security.sh) ===/,/# === End Security Hardening ===/d' "$sshd_conf"
+                local include_line tmp_file
+                include_line=$(grep -n "^Include" "$sshd_conf" 2>/dev/null | head -1 | cut -d: -f1)
+                if [[ -n "$include_line" ]]; then
+                    tmp_file=$(mktemp)
+                    head -n "$(( include_line - 1 ))" "$sshd_conf" > "$tmp_file"
+                    printf '%s\n' "$block" >> "$tmp_file"
+                    tail -n "+${include_line}" "$sshd_conf" >> "$tmp_file"
+                    local orig_mode
+                    orig_mode=$(stat -c %a "$sshd_conf" 2>/dev/null || echo 644)
+                    mv "$tmp_file" "$sshd_conf"
+                    chmod "$orig_mode" "$sshd_conf"
+                else
+                    echo "$block" >> "$sshd_conf"
+                fi
             fi
             success "Шифры/MAC/KexAlgorithms применены."
 
@@ -1241,7 +1372,7 @@ LoginGraceTime 30
 }
 
 # ======================================================================
-# МОДУЛЬ 10: Блокировка root
+# МОДУЛЬ 8: Блокировка root
 # ======================================================================
 module_lock_root() {
     header "МОДУЛЬ 10: Блокировка пароля root"
@@ -1487,30 +1618,8 @@ show_menu() {
 # ТОЧКА ВХОДА
 # ======================================================================
 main() {
-    # Если stdin — pipe (curl | bash), переключить на терминал
-    if [[ ! -t 0 ]]; then
-        exec </dev/tty
-    fi
-
-    check_root
-    init_paths
-
-    # Обработка аргументов
+    # Справка доступна без root и без tty
     case "${1:-}" in
-        --rollback)
-            do_rollback "${2:-}"
-            exit $?
-            ;;
-        --dry-run)
-            DRY_RUN=true
-            echo ""
-            echo -e "${BOLD}${CYAN}══════════════════════════════════════════════════════════════${NC}"
-            echo -e "${BOLD}${CYAN}  ◎  РЕЖИМ ДЕМОНСТРАЦИИ (dry-run)                             ${NC}"
-            echo -e "${BOLD}${CYAN}  Скрипт покажет что БУДЕТ сделано, но НИЧЕГО не изменит.      ${NC}"
-            echo -e "${BOLD}${CYAN}  Для реальных изменений запустите без --dry-run              ${NC}"
-            echo -e "${BOLD}${CYAN}══════════════════════════════════════════════════════════════${NC}"
-            echo ""
-            ;;
         --help|-h)
             echo ""
             echo "Использование: bash $SCRIPT_NAME [опция]"
@@ -1526,6 +1635,44 @@ main() {
             echo "  curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh | bash"
             echo ""
             exit 0
+            ;;
+    esac
+
+    # Если stdin — pipe (curl | bash), переключить на терминал.
+    # Если терминала нет (cron/CI/docker) — понятная ошибка вместо падения
+    if [[ ! -t 0 ]]; then
+        if ( exec </dev/tty ) 2>/dev/null; then
+            exec </dev/tty
+        else
+            show_ascii_critical "Нет интерактивного терминала (tty)!" \
+                "Запустите скрипт в интерактивном терминале: bash ${SCRIPT_NAME}"
+            exit 1
+        fi
+    fi
+
+    # Демо-режим безопасен и без root: пишет только в /tmp
+    if [[ "${1:-}" != "--dry-run" ]]; then
+        check_root
+    fi
+
+    # --dry-run ДО init_paths: демо-режим пишет лог/бэкапы только в /tmp
+    if [[ "${1:-}" == "--dry-run" ]]; then
+        DRY_RUN=true
+        echo ""
+        echo -e "${BOLD}${CYAN}══════════════════════════════════════════════════════════════${NC}"
+        echo -e "${BOLD}${CYAN}  ◎  РЕЖИМ ДЕМОНСТРАЦИИ (dry-run)                             ${NC}"
+        echo -e "${BOLD}${CYAN}  Скрипт покажет что БУДЕТ сделано, но НИЧЕГО не изменит.      ${NC}"
+        echo -e "${BOLD}${CYAN}  Для реальных изменений запустите без --dry-run              ${NC}"
+        echo -e "${BOLD}${CYAN}══════════════════════════════════════════════════════════════${NC}"
+        echo ""
+    fi
+
+    init_paths
+
+    case "${1:-}" in
+        --rollback)
+            do_rollback "${2:-}"
+            exit $?
             ;;
     esac
 

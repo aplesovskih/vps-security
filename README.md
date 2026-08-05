@@ -14,6 +14,8 @@ curl -s https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-secu
 curl -sO https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-security.sh && bash vps-security.sh --dry-run
 ```
 
+Демо-режим безопасен: не требует прав root и не пишет в систему — лог и временные файлы создаются только в `/tmp`.
+
 ## Модули
 
 | # | Модуль | Описание |
@@ -51,7 +53,7 @@ curl -sO https://raw.githubusercontent.com/aplesovskih/vps-security/main/vps-sec
 ## Требования
 
 - Debian 10+ / Ubuntu 20.04+
-- Права root
+- Права root (только для реального применения изменений; `--dry-run` и `--help` работают без root)
 - Подключение к интернету (для установки пакетов)
 
 ## Структура файлов
